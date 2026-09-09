@@ -50,7 +50,14 @@ Three files this maintains, with different mutability:
     actual forward P&L record to judge this against.
 
 Run daily (same slot as tech_level_live.py before it, after the prior US
-close): ./venv/bin/python tech_level_continuation_live.py
+close), via strategies/five_day_bounce/run_live_log.sh from repo root, or
+directly: ./venv/bin/python strategies/five_day_bounce/tech_level_continuation_live.py
+
+Part of the strategies/five_day_bounce package -- see NOTES.md in this folder
+for the full strategy writeup and how these scripts fit together.
+tech_level_live.py and tech_levels.py stay at the repo root: the former is
+shared plumbing for a retired daily report (still used elsewhere), the latter
+is the core level-mechanics module several unrelated research scripts import.
 """
 import datetime
 import json
@@ -60,6 +67,7 @@ import sys
 
 import pandas as pd
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import config
 from tech_level_live import pull_all, bar_is_settled, SOCKET_TIMEOUT, EXIT_UNSETTLED, _sessions_since
 from tech_level_naive_strategy import load_fixed_combo, build_levels, active_support_resistance

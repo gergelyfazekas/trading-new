@@ -9,3 +9,10 @@ __pycache__/
 data/*
 !data/live_log.csv
 !data/live_combos.json
+
+# Same convention for the five_day_bounce strategy's own data folder:
+# fixed_combo.json is the frozen live combo (tiny, defines what the CSVs
+# below mean); the trade/signal/position files are regenerable or append-only
+# forward records kept out of git for the same reason as data/live_log.csv.
+strategies/five_day_bounce/data/*
+!strategies/five_day_bounce/data/fixed_combo.json

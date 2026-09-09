@@ -979,6 +979,59 @@ raw-return check both hold up. Not yet wired into `tech_level_naive_strategy.sim
 or `tech_level_continuation_live.py` -- a live-trading behavior change,
 flagged for confirmation before shipping rather than applied on this pass.
 
+## Reorg into strategies/five_day_bounce/, and a watchlist bug (2026-09-09)
+
+**The watchlist bug.** `tech_level_watchlist.py` was silently relabeling any
+`watch` row as `BUY` whenever the logged price sat inside BUY BAND, with no
+check on `support_age_days` at all. Since `active_support_resistance()` and
+the live rule share one `dist` calculation, the *only* way a row logged
+`watch` can have price inside BUY BAND is `support_age_days >= MAX_AGE_DAYS`
+(dist would already have been in range, so age is the one thing that could
+still have blocked a `buy`). That means the override wasn't catching a rare
+boundary case as its docstring claimed ("cuts it off by one day") -- it was
+unconditionally re-including *every* aged-out level whose price happened to
+revisit the zone, which is exactly the 5-20-day-and-older bucket this file's
+"Level age at entry" section (2026-09-07, above) found has ~zero excess on
+OOS (t=0.19) and negative, significant excess on `ticker_list` (t=-2.01).
+Caught 2026-09-09: GILD, 11 days old, shown as BUY. Fixed by making the
+watchlist's STATUS column a direct, unmodified read of the log's own `event`
+-- it never recomputes or overrides what the live script decided. A
+price-in-zone-but-aged-out row still gets surfaced (it's genuinely useful
+context -- explains why a familiar-looking level isn't a signal) but now via
+a `NOTE` column reading "zone, aged out", never via `STATUS`.
+
+**The reorg.** Moved everything specific to this strategy -- the five scripts
+downstream of `tech_levels.py`/`config.py`/`stock_class.py`
+(`tech_level_naive_strategy.py`, `tech_level_oos_strategy.py`,
+`tech_level_sensitivity.py`, `tech_level_continuation_live.py`,
+`tech_level_watchlist.py`), `run_live_log.sh`, and its data
+(`continuation_signal_log.csv`, `continuation_positions.json`,
+`naive_strategy_trades.csv`, `oos_strategy_trades.csv`) -- into
+`strategies/five_day_bounce/`, with a new `NOTES.md` there as the
+strategy-specific entry point (what each script does, the code chain, the
+frozen rule, how to run things). `tech_levels.py`, `config.py`,
+`stock_class.py`, and `tech_level_live.py` stay at the repo root: the first
+three are shared by unrelated research scripts (`tech_level_search.py`,
+`tech_level_scoring.py`, `tech_level_trades.py`, `tech_level_input.py`,
+`tech_level_app.py`) that predate and fed into this strategy but aren't part
+of running it, and `tech_level_live.py` is the retired daily script whose
+plumbing (`pull_all`, `bar_is_settled`, `_sessions_since`) the live script
+here still imports directly.
+
+The frozen combo also got split out: `data/live_combos.json` stays at the
+root (still used by `tech_level_live.py` for its per-ticker tuned combos);
+`strategies/five_day_bounce/data/fixed_combo.json` is a new file holding just
+the frozen `{tech_width: 0.008, distance: 10, prominence: 0.01, ...}` dict,
+so this strategy's data folder doesn't depend on the retired script's file.
+This file's own dated sections above (paths like `tech_level_watchlist.py`,
+`data/naive_strategy_trades.csv`) predate the move and were left as written
+-- read them as `strategies/five_day_bounce/<name>`. The launchd agent
+(`com.gergelyfazekas.techlevellive.plist`) was repointed at
+`strategies/five_day_bounce/run_live_log.sh` and reloaded; `git mv` was used
+for the five tracked scripts and `run_live_log.sh`, plain `mv` for the four
+untracked data files (all still covered by the same `data/*` gitignore
+pattern, now scoped to `strategies/five_day_bounce/data/*` too).
+
 ## Open threads / next steps
 
 **Where this stands as of 2026-07-21.** The levels were pursued to feed the

@@ -30,6 +30,12 @@
 #      an unsettled bar (exit 3) instead of recording a partial one.
 #   3. Idle sleep suspending the run mid-flight. `caffeinate -i` holds the
 #      machine awake for the duration.
+#
+# 2026-09-09: moved into strategies/five_day_bounce/ along with the rest of
+# this strategy's scripts and data (see NOTES.md in this folder). Still
+# invoked with $PROJECT (repo root) as cwd -- only the script path below
+# changed -- and the launchd plist's ProgramArguments was updated to this
+# file's new path.
 
 set -u
 
@@ -61,7 +67,7 @@ run_with_timeout() {
 for attempt in $(seq 1 $ATTEMPTS); do
     echo "=== $(date '+%Y-%m-%d %H:%M:%S %Z')  attempt ${attempt}/${ATTEMPTS} ==="
 
-    run_with_timeout "$RUN_TIMEOUT" caffeinate -i "$PY" tech_level_continuation_live.py
+    run_with_timeout "$RUN_TIMEOUT" caffeinate -i "$PY" strategies/five_day_bounce/tech_level_continuation_live.py
     rc=$?
 
     if [[ $rc -eq 0 ]]; then

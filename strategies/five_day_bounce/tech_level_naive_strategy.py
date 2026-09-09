@@ -21,37 +21,42 @@ tests the plainer rule someone would actually hand-trade:
     dropped, not truncated, to avoid biasing the sample toward whatever the last
     few days happened to do (same convention as trade_events).
 
-Uses the fixed a-priori combo from data/live_combos.json (distance=10,
+Uses the fixed a-priori combo from data/fixed_combo.json (distance=10,
 prominence=0.01, tech_width=0.008) -- chosen without looking at any stock's
 outcome, so results here carry no per-stock combo-selection bias. That combo was
 itself picked from universe-wide calibration, not from this test, so it is not
 selected on this outcome either.
 
 Benchmarked against the equal-weight universe (same convention as
-tech_level_trades.py) and against random-entry placebo draws matched on trade
-count, per-stock frequency, and holding-length distribution -- megacaps beating
-an equal-weight book from *any* entry point has overturned "wins" here before
-(see tech_levels_notes.md, GOOG/MSFT/CSCO).
+tech_level_trades.py, at the repo root) and against random-entry placebo draws
+matched on trade count, per-stock frequency, and holding-length distribution --
+megacaps beating an equal-weight book from *any* entry point has overturned
+"wins" here before (see tech_levels_notes.md, GOOG/MSFT/CSCO).
+
+Part of the strategies/five_day_bounce package -- see NOTES.md in this folder
+for how this fits with the other scripts here.
 """
 import json
 import datetime
 import os
+import sys
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import config
 from stock_class import StockList
 from tech_levels import find_touches, build_levels_causal, mark_broken
 
-COMBO_FILE = os.path.join(os.path.dirname(__file__), "data", "live_combos.json")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+COMBO_FILE = os.path.join(DATA_DIR, "fixed_combo.json")
 START_DATE = datetime.date(2015, 5, 28)
 
 
 def load_fixed_combo(path=COMBO_FILE):
     with open(path) as f:
-        raw = json.load(f)
-    return raw["fixed"]
+        return json.load(f)
 
 
 def build_levels(close, combo):
@@ -288,7 +293,7 @@ def main():
             continue
     print(f"got price series for {len(series)} tickers")
 
-    run_backtest(series, combo, "data/naive_strategy_trades.csv")
+    run_backtest(series, combo, os.path.join(DATA_DIR, "naive_strategy_trades.csv"))
 
 
 if __name__ == "__main__":

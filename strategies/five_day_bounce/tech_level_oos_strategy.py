@@ -2,9 +2,10 @@
 (tech_level_naive_strategy.py) on config.oos_ticker_list.
 
 Those 60 names are disjoint from config.ticker_list and have never
-contributed to DEFAULT_GRID's universe calibration (tech_level_search.py) or
-to picking the fixed combo (distance=10, prominence=0.01, tech_width=0.008
-in data/live_combos.json) -- so this is a genuinely fresh cross-section for
+contributed to DEFAULT_GRID's universe calibration (tech_level_search.py, repo
+root) or to picking the fixed combo (distance=10, prominence=0.01,
+tech_width=0.008 in data/fixed_combo.json) -- so this is a genuinely fresh
+cross-section for
 the exact rule already validated on ticker_list: buy within 1% of a support
 band, sell at hold_days or on touching the nearest known resistance,
 whichever comes first. Same combo, same entry/exit rule, same placebo
@@ -28,14 +29,19 @@ pre-pulled snapshot vol_regime.py/volume_model.py/alpha.py already use for
 this universe -- rather than a fresh yfinance call, so the record doesn't
 depend on when this script happens to run.
 
-Run: ./venv/bin/python tech_level_oos_strategy.py
+Run (from repo root): ./venv/bin/python strategies/five_day_bounce/tech_level_oos_strategy.py
 """
+import os
+import sys
+
 import pandas as pd
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import config
 from stock_class import StockList
 from tech_level_naive_strategy import load_fixed_combo, run_backtest
 
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 EXCLUDE = {"NVDA"}  # see module docstring
 
 
@@ -58,7 +64,7 @@ def main():
             continue
     print(f"got price series for {len(series)} tickers")
 
-    run_backtest(series, combo, "data/oos_strategy_trades.csv", label=" (OOS universe)")
+    run_backtest(series, combo, os.path.join(DATA_DIR, "oos_strategy_trades.csv"), label=" (OOS universe)")
 
 
 if __name__ == "__main__":

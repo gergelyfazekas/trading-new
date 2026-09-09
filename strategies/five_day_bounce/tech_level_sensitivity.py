@@ -19,13 +19,16 @@ tech_level_oos_strategy.py for why NVDA is dropped):
      "support" label), or does it persist for levels that have stood
      unbroken for a while?
 
-Run: ./venv/bin/python tech_level_sensitivity.py
+Run (from repo root): ./venv/bin/python strategies/five_day_bounce/tech_level_sensitivity.py
 """
 import datetime
+import os
+import sys
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import config
 from stock_class import StockList
 from tech_level_naive_strategy import load_fixed_combo, build_levels, simulate, equal_weight_curve, attach_benchmark
