@@ -1,5 +1,6 @@
 from stock_class import StockList
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from functools import reduce
 from sklearn.model_selection import TimeSeriesSplit
@@ -61,11 +62,17 @@ def create_x_y(stock_list, y_col, x_cols, last_day_only=False):
         X = X.loc[Y.index]
     return X, Y
 
-def create_long_x_y(stock_list, y_col, x_cols=None, cols_to_drop=None, add_time_features=True):
+def create_long_x_y(stock_list, y_col, x_cols=None, cols_to_drop=None, add_time_features=True,
+                    horizon=1):
     """
     Returns X (features) and Y (targets) in long format:
     - one row per (date, stock)
     - shared feature set
+
+    horizon: how many days forward the target spans. 1 reproduces the original
+    next-day behaviour; h > 1 gives the cumulative log return over t+1..t+h.
+    Note that h > 1 makes consecutive rows' targets overlap, so any cross
+    validation over the result must purge at least h days between train and test.
     """
     all_rows = []
 
@@ -81,8 +88,8 @@ def create_long_x_y(stock_list, y_col, x_cols=None, cols_to_drop=None, add_time_
         # Add stock identifier
         df['stock'] = tkr
 
-        # Shift target up by 1 day (predict t+1 log_return)
-        df['target'] = df[y_col].shift(-1)
+        # Forward target over t+1..t+horizon (log returns add, so a plain sum)
+        df['target'] = df[y_col].rolling(horizon).sum().shift(-horizon)
         df = df.drop(columns=[y_col])
 
         all_rows.append(df)
@@ -105,11 +112,98 @@ def create_long_x_y(stock_list, y_col, x_cols=None, cols_to_drop=None, add_time_
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 
-def build_pipeline():
+
+# Columns in the gold tier that are identifiers or leftovers rather than features:
+# the date survives as several duplicated columns (dt, dt.1 ... dt.3) from the
+# pull/merge steps, and 'ticker' duplicates the 'stock' column create_long_x_y adds.
+# Leaving any of them in makes the panel non-numeric and RandomForest.fit raises.
+NON_FEATURE_COLS = ['dt', 'dt.1', 'dt.2', 'dt.3', 'ticker']
+
+# Raw price and volume *levels*. A tree splits on absolute values, so in a panel
+# pooled across stocks these act as stock identity and regime labels -- "close >
+# 180" identifies a handful of tickers in a handful of years, which fits the
+# training window and generalizes to nothing. Dropping them took the baseline
+# from consistently anti-predictive (mean IC -0.018, negative in all four
+# walk-forward folds) to roughly zero, and improved the with-tl_ arm as well.
+# The information is not lost: the tl_* distances, sma_cross_*, rsi_* and the
+# vol model's own features all express the same content in stationary form.
+NON_STATIONARY_COLS = ['close', 'high', 'low', 'open', 'volume',
+                       'sma_9', 'sma_14', 'sma_20', 'sma_50', 'sma_100']
+
+
+def build_panel(stock_list, y_col='log_return', selection_cutoff='2021-06-01',
+                tech_level_log=None, cols_to_drop=None, horizon=10, vol_scale=True):
+    """Load technical-level features onto stock_list and return the long panel.
+
+    Wraps create_long_x_y with the tl_* columns attached (tech_level_input), and
+    enforces the one ordering rule that keeps the combo choice honest: combos and
+    their confidence weights are selected using only data at or before
+    selection_cutoff, so the panel is truncated to start strictly after it.
+    Without that truncation the model would train on dates whose feature
+    *configuration* was chosen with knowledge of those same dates.
+
+    horizon / vol_scale: the target is the cumulative log return over the next
+    `horizon` days, divided by the volatility model's sigma_hat * sqrt(horizon)
+    when vol_scale is on. Scaling matters specifically because this panel is
+    pooled across stocks: squared-error loss on raw returns is dominated by
+    whichever names are noisiest, so the model spends its capacity on them and
+    treats a large move in a calm stock as near-zero signal. Dividing by
+    forecast vol makes a "surprise" comparable across stocks and across regimes.
+    sqrt(horizon) is the usual scaling of cumulative return dispersion, so the
+    target comes out roughly unit-variance.
+
+    sigma_hat is produced by volatility.fit_predict_sigma trained strictly before
+    selection_cutoff, so it carries no information from the panel's own period.
+
+    tech_level_log: the grid-search log (tech_level_scoring.load_log). If None,
+        it's loaded from config.tech_level_folder.
+    """
+    from tech_level_input import select_combos, add_level_features
+    from tech_level_scoring import load_log
+    from config import tech_level_folder
+
+    log = tech_level_log if tech_level_log is not None else load_log(tech_level_folder)
+    combos, confidence = select_combos(log, selection_cutoff)
+    add_level_features(stock_list, combos, confidence=confidence)
+
+    drop = (NON_FEATURE_COLS + NON_STATIONARY_COLS) if cols_to_drop is None else cols_to_drop
+    X, Y = create_long_x_y(stock_list, y_col=y_col, cols_to_drop=drop, horizon=horizon)
+    X.index = pd.to_datetime(X.index)
+    Y.index = X.index
+
+    start = pd.Timestamp(selection_cutoff)
+    keep = X.index > start
+    X, Y = X.loc[keep], Y.loc[keep]
+
+    if vol_scale:
+        from volatility import build_vol_panel, fit_predict_sigma
+        vX, vy = build_vol_panel(stock_list, horizon=horizon, return_col=y_col)
+        sigma = fit_predict_sigma(vX, vy, cutoff=selection_cutoff, horizon=horizon)
+
+        key = pd.MultiIndex.from_arrays([X.index, X['stock']])
+        sig_key = pd.MultiIndex.from_arrays([sigma.index, sigma['stock']])
+        aligned = pd.Series(sigma['sigma_hat'].values, index=sig_key).reindex(key)
+
+        ok = aligned.notna().values & (aligned.values > 0)
+        X, Y = X[ok], Y[ok]
+        Y = Y / (aligned.values[ok] * np.sqrt(horizon))
+
+    print(f'panel: {X.shape[0]:,} rows x {X.shape[1]} features, '
+          f'{X.index.min().date()} -> {X.index.max().date()}, '
+          f'horizon={horizon}d, vol_scaled={vol_scale}, target sd={Y.std():.3f}')
+    return X, Y
+
+def build_pipeline(max_features=0.5):
     regressor = RandomForestRegressor(
         n_estimators=500,
         max_depth=None,
         min_samples_leaf=10,
+        # sklearn's regressor default is 1.0 -- every split considers every
+        # feature, so a handful of dominant features can crowd weaker ones out of
+        # the forest entirely. Capping it forces splits to be chosen without them
+        # part of the time, which is what gives minority-useful features (the
+        # tl_* level columns, useful on a few stocks) a chance to be used at all.
+        max_features=max_features,
         random_state=0,
         n_jobs=-1
     )

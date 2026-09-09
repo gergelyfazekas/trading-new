@@ -1,0 +1,70 @@
+{
+  "fixed": {
+    "tech_width": 0.008,
+    "consider_volume": false,
+    "volume_height": 0.0,
+    "volume_prominence": 0.0,
+    "distance": 10,
+    "prominence": 0.01
+  },
+  "tickers": {
+    "AAPL": {
+      "tuned": {
+        "tech_width": 0.012,
+        "consider_volume": false,
+        "volume_height": 0.0,
+        "volume_prominence": 0.0,
+        "distance": 5,
+        "prominence": 0.03
+      }
+    },
+    "ABBV": {},
+    "ABT": {},
+    "ACN": {},
+    "ADBE": {},
+    "ADM": {},
+    "AEP": {},
+    "AMAT": {},
+    "AMGN": {},
+    "AMZN": {
+      "tuned": {
+        "tech_width": 0.02,
+        "consider_volume": false,
+        "volume_height": 0.0,
+        "volume_prominence": 0.0,
+        "distance": 5,
+        "prominence": 0.05
+      }
+    },
+    "AXP": {},
+    "BA": {},
+    "BAC": {},
+    "C": {},
+    "CAT": {},
+    "COP": {},
+    "COST": {},
+    "CSCO": {},
+    "CVX": {},
+    "DE": {},
+    "DHR": {},
+    "DIS": {},
+    "DOV": {},
+    "GOOG": {},
+    "GS": {},
+    "HD": {},
+    "HON": {},
+    "IBM": {},
+    "JNJ": {},
+    "JPM": {},
+    "KO": {},
+    "LMT": {},
+    "MCD": {},
+    "MMM": {},
+    "MO": {},
+    "MRK": {},
+    "MSFT": {},
+    "NKE": {},
+    "T": {},
+    "XOM": {}
+  }
+}

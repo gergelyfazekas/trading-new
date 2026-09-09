@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+# Bulk data (price tiers, grid-search logs) is regenerable -- keep it out.
+# The two exceptions below are not: live_log.csv is a decision-time forward
+# record that can never be recomputed (see append_log in tech_level_live.py),
+# and live_combos.json defines what its rows mean. Both are tiny.
+data/*
+!data/live_log.csv
+!data/live_combos.json
