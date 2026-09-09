@@ -11,8 +11,12 @@ sorted table:
      A [P] suffix on STATUS means the triggering level is still provisional
      (age in *sessions* <= distance=10) -- see that script's module docstring:
      later price action could still un-confirm the touch that created it.
-  2. HELD -- currently in an open position.
-  3. SOLD -- exited on the latest run.
+  2. HELD -- currently in an open position (bought on an earlier run, not yet
+     sold). NOTE shows entry price, unrealized return, days held out of
+     HOLD_DAYS, and the resistance band that triggers an early exit if hit
+     (blank if no resistance was active at entry -- exits on HOLD_DAYS only).
+  3. SOLD -- exited on the latest run. NOTE shows entry/exit price, realized
+     return, days held, and why (hold_days or resistance).
   4. everything else ("watch"), split into two groups: supports with
      AGE < MAX_AGE_DAYS (still inside the rule's age window -- can still fire
      on a future run if price closes into BUY BAND) sort above supports with
@@ -50,7 +54,7 @@ import os
 
 import pandas as pd
 
-from tech_level_continuation_live import LIVE_TICKERS, MAX_AGE_DAYS, NEAR_PCT
+from tech_level_continuation_live import LIVE_TICKERS, MAX_AGE_DAYS, NEAR_PCT, HOLD_DAYS
 
 SIGNAL_LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "continuation_signal_log.csv")
 
@@ -114,6 +118,14 @@ def main():
         age = f"{int(row['support_age_days'])}d" if pd.notna(row.get("support_age_days")) else "--"
         marker = "*" if row["event"] == "buy" else " "
         note = row["note"] if row["note"] else ""
+        if row["event"] == "held":
+            unrl = row["price"] / row["entry_price"] - 1.0
+            note = f"entry {row['entry_price']:.2f} ({unrl:+.1%} unrl), day {int(row['days_held'])}/{HOLD_DAYS}"
+            if pd.notna(row.get("resist_low")):
+                note += f", exits early if price re-enters {row['resist_low']:.2f}-{row['resist_high']:.2f}"
+        elif row["event"] == "sell":
+            note = (f"entry {row['entry_price']:.2f} -> exit {row['exit_price']:.2f} "
+                     f"({row['ret']:+.1%}), held {int(row['days_held'])}d ({row['reason']})")
         print(f"{marker} {ticker:6} {status:6} {price:>9} {level:>15} {buy_band:>15} {dist:>7} {age:>5}  {note}")
 
 

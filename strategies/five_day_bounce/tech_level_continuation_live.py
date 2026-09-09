@@ -137,6 +137,13 @@ def append_rows(rows, path, columns, key_cols):
 
 def _row(as_of, ticker, price, event, reason=None, support=None, age_days=None, provisional=None,
          resistance=None, entry_date=None, entry_price=None, exit_price=None, ret=None, days_held=None):
+    """`resistance` accepts either a Level object (has `.band`, from
+    active_support_resistance at entry time) or a plain (low, high) pair (the
+    resist_band tuple stashed in `positions[ticker]` for an open position) --
+    the held/sell branches below only have the latter, since the Level object
+    itself isn't persisted across runs in continuation_positions.json.
+    """
+    resist_band = getattr(resistance, 'band', resistance)
     return {
         'run_date': datetime.date.today(), 'as_of': pd.Timestamp(as_of).date(), 'ticker': ticker,
         'price': round(price, 4), 'event': event, 'reason': reason,
@@ -145,8 +152,8 @@ def _row(as_of, ticker, price, event, reason=None, support=None, age_days=None, 
         'support_birth': pd.Timestamp(support.birth_date).date() if support else None,
         'support_age_days': age_days,
         'provisional': provisional,
-        'resist_low': round(resistance.band[0], 4) if resistance else None,
-        'resist_high': round(resistance.band[1], 4) if resistance else None,
+        'resist_low': round(resist_band[0], 4) if resist_band else None,
+        'resist_high': round(resist_band[1], 4) if resist_band else None,
         'entry_date': entry_date, 'entry_price': entry_price, 'exit_price': exit_price,
         'ret': ret, 'days_held': days_held,
     }
@@ -173,7 +180,7 @@ def evaluate_ticker(ticker, close, combo, positions, distance):
             reason = 'resistance' if hit_resistance else 'hold_days'
             ret = price / pos['entry_price'] - 1.0
             del positions[ticker]
-            signal_row = _row(as_of, ticker, price, 'sell', reason=reason,
+            signal_row = _row(as_of, ticker, price, 'sell', reason=reason, resistance=resist,
                                entry_date=pos['entry_date'], entry_price=pos['entry_price'],
                                exit_price=price, ret=ret, days_held=days_held)
             trade_row = {
@@ -184,7 +191,7 @@ def evaluate_ticker(ticker, close, combo, positions, distance):
             return signal_row, trade_row
         else:
             positions[ticker]['days_held'] = days_held
-            signal_row = _row(as_of, ticker, price, 'held',
+            signal_row = _row(as_of, ticker, price, 'held', resistance=resist,
                                entry_date=pos['entry_date'], entry_price=pos['entry_price'], days_held=days_held)
             return signal_row, None
 
