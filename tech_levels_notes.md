@@ -1032,6 +1032,61 @@ for the five tracked scripts and `run_live_log.sh`, plain `mv` for the four
 untracked data files (all still covered by the same `data/*` gitignore
 pattern, now scoped to `strategies/five_day_bounce/data/*` too).
 
+## Causal walk-forward check on the provisional-levels caveat (2026-09-15)
+
+The "provisional levels" caveat above (2026-09-07) was flagged but never
+quantified: every level young enough to trade (<5 calendar days) is younger
+than `distance=10` sessions, so the whole-history `find_touches` call the
+backtest uses may have confirmed a touch with future price action a live
+trader at entry wouldn't have had. Quantified directly with the new
+`tech_level_causal_check.py`: for every logged young-level trade
+(`support_age_days < 5`, `hold_days=5`, `near_pct=1%`), truncate that
+ticker's close series to only data up to and including the entry date,
+rebuild levels from the truncated series with the exact same fixed combo,
+and check whether the buy condition still fires.
+
+**Only ~32% of the young-level trades the full-history backtest counted
+would actually have fired live** (344/1068 on `ticker_list`, 493/1568 on
+`oos`) — the rest exist only because the detector could see future price
+action. The causally-confirmed subset still shows a real, positive edge, but
+roughly half the reported magnitude:
+
+| universe | full (hindsight) | causally-confirmed only |
+|---|---|---|
+| `ticker_list` | n=1068, mean_excess +1.04%, t=10.43 | n=344 (32.2%), mean_excess +0.51%, t=3.27 |
+| `oos` | n=1568, mean_excess +0.98%, t=13.35 | n=493 (31.4%), mean_excess +0.57%, t=3.83 |
+
+A `distance` sweep (3/5/10/15/20) on the same bucket moves the same
+direction (lower distance → smaller measured edge) but is confounded — it
+also changes which touches count as peaks at all, not just how much
+lookahead a touch needs — so it's supporting evidence, not the decisive
+test.
+
+Checked the causally-confirmed survivors for concentration before trusting
+the t-stat: every ticker in both universes contributes at least one
+surviving trade (not two-name-carried), but the *return* is lopsided — the
+top 5 tickers are 58.8% of total excess return on 18.9% of trades
+(`ticker_list`: AXP, ABT, C, MMM, NKE) and 47.4% on 10.8% of trades (`oos`:
+TGT, FDX, INTC, MS, UNH). By year, no single year dominates outright, but
+2018+2021 are ~48% of `ticker_list`'s total excess return from ~20% of
+trades (2018+2024 ~40% for `oos`), and two years (2020, 2022) are
+flat-to-negative on `ticker_list`. Trades are not independent draws across
+ticker/year, so the pooled t-stats above (3.27/3.83) likely overstate
+confidence on top of the lookahead correction already applied — a
+clustered/block-bootstrap estimate would be the natural next sharpening
+step, not yet done.
+
+**Revised honest read: the forward-tradeable edge for the <5-day-old bucket
+is closer to +0.5% mean excess per trade than the previously reported
++1.0%, on a materially smaller and noisier sample than the full backtest
+implied.** This doesn't overturn the effect — it's still positive and still
+survives a strict causal-information-only test — but the magnitude and
+confidence behind the published +0.41%/+0.27% (t=8.18/4.20) numbers should
+be revised down accordingly; treat those as an upper bound, not the number
+to size a trade on. Script: `strategies/five_day_bounce/tech_level_causal_check.py`;
+per-trade output saved to `strategies/five_day_bounce/data/causal_check_ticker_list.csv`
+/ `causal_check_oos.csv` (regenerable, not tracked).
+
 ## Open threads / next steps
 
 **Where this stands as of 2026-07-21.** The levels were pursued to feed the

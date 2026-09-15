@@ -63,6 +63,11 @@ tech_level_naive_strategy.py      backtest engine: build_levels,
         +--> tech_level_sensitivity.py     near_pct x hold grid, cost sweep,
         |                                  age-bucket sweep (prints only)
         |
+        +--> tech_level_causal_check.py    causal walk-forward recheck of
+        |                                  young-level trades + distance
+        |                                  sensitivity (prints + writes
+        |                                  data/causal_check_*.csv)
+        |
         v  (frozen rule ships to)
 tech_level_continuation_live.py   daily live signal + position tracking.
         |                         Imports pull_all/bar_is_settled/_sessions_since
@@ -106,6 +111,13 @@ historical and shouldn't be touched.
   neighborhood hold), a cost_bps sweep (breakeven round-trip cost), and the
   age-bucket sweep that produced the level-age finding above. Prints to
   stdout only, writes nothing.
+- **`tech_level_causal_check.py`** -- direct test of the provisional-levels
+  caveat: rechecks every young-level trade by rebuilding levels from each
+  ticker's close series truncated to the entry date (only data a live trader
+  would have had), plus a `distance` sensitivity sweep. See
+  `tech_levels_notes.md`, 2026-09-15. Writes
+  `data/causal_check_ticker_list.csv` / `data/causal_check_oos.csv`
+  (per-trade detail, regenerable).
 - **`tech_level_continuation_live.py`** -- the only script that touches real
   positions. Run once daily, after the prior US close settles: pulls fresh
   closes for all 101 names, evaluates each against open positions or the
@@ -140,6 +152,7 @@ historical and shouldn't be touched.
 | `continuation_trades.csv` | no | append-only closed-trade ledger -- the real P&L record |
 | `naive_strategy_trades.csv` | no | regenerable -- rebuilt by `tech_level_naive_strategy.py` |
 | `oos_strategy_trades.csv` | no | regenerable -- rebuilt by `tech_level_oos_strategy.py` |
+| `causal_check_ticker_list.csv` / `causal_check_oos.csv` | no | regenerable -- rebuilt by `tech_level_causal_check.py` |
 
 ## Running things
 
@@ -156,18 +169,28 @@ All commands from the repo root (`trading-new/`), using the project venv:
 ./venv/bin/python strategies/five_day_bounce/tech_level_naive_strategy.py
 ./venv/bin/python strategies/five_day_bounce/tech_level_oos_strategy.py
 ./venv/bin/python strategies/five_day_bounce/tech_level_sensitivity.py
+./venv/bin/python strategies/five_day_bounce/tech_level_causal_check.py
 ```
 
 ## Known caveats (read before trusting a signal)
 
-- **Provisional levels.** Every level young enough to qualify (<5 calendar
-  days) is younger than the combo's `distance=10` session parameter -- the
-  same zone where `tech_level_live.py`'s `provisional_mask` found a real
-  false-start rate (an AAPL band appeared for 5 sessions, then was un-born).
-  A live buy can, in principle, later turn out to have been triggered by a
-  touch that further price action retroactively un-confirms. Every buy row
-  logs `provisional` (age in *sessions* <= 10) so this can be checked, not
-  just assumed; the watchlist flags it as `[P]` / a `provisional` note.
+- **Provisional levels -- quantified 2026-09-15, and it's material.** Every
+  level young enough to qualify (<5 calendar days) is younger than the
+  combo's `distance=10` session parameter, so the backtest's whole-history
+  `find_touches` call may confirm a touch with future price action a live
+  trader at entry wouldn't have had. Causal walk-forward recheck
+  (`tech_level_causal_check.py`, see `tech_levels_notes.md` 2026-09-15):
+  **only ~32% of logged young-level trades would actually have fired using
+  only data available at entry time.** The survivors still show a real
+  positive edge, but at roughly half the reported magnitude (+0.51%/+0.57%
+  mean excess, t=3.27/3.83, n=344/493) vs. the full-history backtest
+  (+1.04%/+0.98%, t=10.43/13.35, n=1068/1568). Treat the published
+  +0.41%/+0.27% (t=8.18/4.20) backtest numbers as an optimistic upper bound,
+  not the number to size a trade on. Every live buy row still logs
+  `provisional` (age in *sessions* <= 10, essentially always True by
+  construction) so this can keep being checked against the forward record,
+  not just the backtest; the watchlist flags it as `[P]` / a `provisional`
+  note.
 - **No stop-loss.** The live rule only exits on `hold_days` or a resistance
   touch, never on the trade going wrong. `stop_low` tested as a real
   improvement but isn't wired into `simulate()` or the live script yet.
