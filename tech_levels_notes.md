@@ -1087,6 +1087,169 @@ to size a trade on. Script: `strategies/five_day_bounce/tech_level_causal_check.
 per-trade output saved to `strategies/five_day_bounce/data/causal_check_ticker_list.csv`
 / `causal_check_oos.csv` (regenerable, not tracked).
 
+## Fully causal entry+exit, real inference, and a reversal placebo (2026-09-15)
+
+Follow-up to the causal-check section above, closing the three gaps it
+explicitly flagged as not yet done: the exit side was still hindsight,
+the pooled t-stat assumed i.i.d. trades, and the "is this even about
+levels" placebo had never been run. Extended
+`strategies/five_day_bounce/tech_level_causal_check.py` with four steps,
+each downstream of the last; full detail and the plan behind this work in
+the session that produced it, summary here.
+
+### A. Exit-side lookahead: real, but negligible in practice
+
+The entry-only check reused the hindsight exit (`exit_date`/`ret`) computed
+from whole-history levels — a resistance band needs exactly the same
+`distance`=10-session confirmation as a support band, so a hindsight "exit
+on day 2 of 5" could rest on a resistance level not actually confirmable
+until day 6+. Fixed by picking resistance once, from levels built on data
+truncated to the *entry* date only, and never rebuilding mid-hold (exact,
+not approximate, at `hold_days`=5 < `distance`=10 — no touch unconfirmed at
+entry can become confirmable before the hold ends, a fact provable from the
+parameters alone, since confirming any touch needs 10 further sessions and
+the trade is over in 5). Result: the entry survival rate reproduces the
+prior check exactly (32.2%/344 on `ticker_list`, 31.4%/493 on `oos` — a
+clean regression check), and the true point-in-time exit differs from the
+hindsight one in only 1.4-1.5% of trades. Corrected mean excess is
+**+0.5214% (t=3.32, n=344) on `ticker_list`, +0.5749% (t=3.88, n=493) on
+`oos`** — essentially unchanged from the entry-only numbers (+0.51%/+0.57%).
+**The exit side was a real gap but not a material one in this data; the
+entry-side lookahead was where nearly all of the inflation was.**
+
+### B. Inference under clustering: the edge survives, still worth flagging
+
+Replaced the plain pooled t-stat (assumes independent trades; this sample
+clusters by ticker and overlaps in time) with a calendar-year block
+bootstrap and a ticker-clustered SE, run on the causally-confirmed sample:
+
+| universe | block-bootstrap 95% CI | P(mean<=0) | cluster-SE t |
+|---|---|---|---|
+| `ticker_list` | [+0.23%, +0.82%] | 0.0% | 3.21 (41 clusters) |
+| `oos` | [+0.34%, +0.83%] | 0.0% | 3.54 (59 clusters) |
+
+Every one of 2,000 year-block bootstrap draws came back positive on both
+universes, and the cluster-robust t survives above 3 despite collapsing
+each universe to 41/59 effectively-independent observations. **The edge
+does not evaporate under conservative, non-i.i.d.-aware inference** — this
+is a genuine confirmation, not a caveat. (2020 and 2022 are still visibly
+weak-to-negative years for `ticker_list` per the concentration report,
+carried over unchanged from the prior section — the bootstrap already
+prices that in rather than assuming it away.)
+
+### C. The decisive test: it isn't about levels
+
+Built a placebo entry rule with no level/band machinery at all: price
+within 1% of a recently confirmed local trough (single point, no
+requirement that a second touch ever matched it into a band), using the
+same truncate-and-rerun causal confirmation check as the real entries, same
+exit mechanics (resistance still comes from whatever support/resistance
+framework applies, so entry is the only thing that differs), matched to the
+real sample's per-ticker trade count. (First attempt at this used a fixed
+`distance`-trading-sessions lag as a cheap proxy for trough confirmation
+delay — a mistake: at `distance`=10 that bound is >=~14 calendar days,
+which always exceeds the 5-calendar-day age window and silently produced
+zero placebo trades on every ticker. Caught immediately since Step C
+printed "no placebo trades generated" instead of a number; fixed by
+actually truncating and rerunning `find_peaks`, which is cheap enough
+restricted to a small window after each candidate trough.)
+
+| universe | real (technical level) | placebo (bare local low) | lift from requiring a level |
+|---|---|---|---|
+| `ticker_list` | n=344, +0.5214% (t=3.32) | n=343, +0.5629% (t=3.17) | **-0.0415%** |
+| `oos` | n=493, +0.5749% (t=3.88) | n=490, +0.6469% (t=3.75) | **-0.0720%** |
+
+**The placebo matches — and on both universes slightly beats — the real
+technical-level trades.** Requiring price to have formed an actual two-touch
+technical level (rather than just any recently-confirmed local low) adds
+nothing measurable to the edge; if anything the extra matching requirement
+costs a small amount, plausibly just from shrinking/filtering the sample.
+This is the second reframing of this effect, and a bigger one than the
+first (2026-09-07: "support holds" -> "young-level continuation"). Read
+together: **what's actually been found and now confirmed twice over (causal
+entry+exit, and now level-vs-no-level) is a short-horizon reversal effect
+conditional on a recent local low, not anything specific to technical
+levels.** The "Five-Day Bounce" name and its published premise are about
+levels; the mechanism underneath it is not. Whether to keep the live rule's
+two-touch level requirement (a strictly narrower, and per this test no
+better-performing, filter on the same underlying reversal signal) or widen
+it to any confirmed local low is an open decision, not made here — see Open
+threads.
+
+### D. Concurrency-capped portfolio equity, and a concurrency surprise
+
+Slotted equity curve (equal-weight capital split across a fixed number of
+concurrent positions, idle capital earning 0%) on the Step A causal sample:
+
+| universe | n_slots | trades accepted | CAGR | Sharpe | max DD | final |
+|---|---|---|---|---|---|---|
+| `ticker_list` | 5 | 344/344 | +9.06% | 1.94 | -7.89% | 2.64x |
+| `ticker_list` | 10 | 344/344 | +4.46% | 1.94 | -4.00% | 1.63x |
+| `ticker_list` | 24 | 344/344 | +1.84% | 1.94 | -1.68% | 1.23x |
+| `oos` | 5 | 487/493 | +14.23% | 2.14 | -15.42% | 4.34x |
+| `oos` | 10 | 493/493 | +6.99% | 2.14 | -7.96% | 2.11x |
+| `oos` | 24 | 493/493 | +2.87% | 2.14 | -3.38% | 1.37x |
+
+Nearly every trade is accepted at every slot count (344/344, 493/493 or
+487/493) — Sharpe barely moves across n_slots, which is the tell: capacity
+is essentially never binding at this trade rate. The p90=10/max=24
+concurrent-position figure quoted in NOTES.md was measured on the full
+(much larger, hindsight-inflated, all-ages) trade set; the causally-confirmed
+<5-day-old bucket used here is ~1/3 the size, and its realized concurrency
+is low enough that 5 slots already covers nearly every trade. **CAGR
+scaling down roughly as 1/n_slots here mostly reflects idle capital, not
+skipped trades** — a real account trading only this signal would rarely be
+capacity-constrained at 5-10 slots; the meaningful sizing question is
+capital-per-trade, not how many slots to reserve.
+
+### Net read
+
+The corrected, inference-robust, entry+exit-causal, non-level-specific edge
+is real by the tests run so far (~+0.5-0.6% mean excess per trade, survives
+block-bootstrap and cluster-robust inference in both universes) but is not
+what "The Five-Day Bounce" describes — it is a generic short-horizon
+reversal-off-a-local-low effect, and the technical-level machinery this
+strategy is built around contributes nothing to it. Script:
+`strategies/five_day_bounce/tech_level_causal_check.py`. Outputs (all
+regenerable, untracked): `data/causal_full_{ticker_list,oos}.csv` (Step A),
+`data/placebo_reversal_{ticker_list,oos}.csv` (Step C),
+`data/portfolio_equity_stats_{ticker_list,oos}.csv` (Step D).
+
+### Combined-universe figures (the numbers quoted in the artifact)
+
+`tech_level_causal_check.py`'s `combined_report()` merges both universes'
+causally-confirmed trades and price series into the single 100-name book
+the live script actually trades (`ticker_list` ∪ `oos`, 837 trades total —
+344 + 493, matching Step A above exactly) rather than reporting the two
+universes side by side:
+
+- **~75.1 trades/year** (837 trades over 11.1 years; 30.5/yr `ticker_list` +
+  44.6/yr `oos`, consistent with the per-universe counts above).
+- **mean raw net return/trade (own capital): +1.50%**; **mean excess vs.
+  equal-weight: +0.55% (t=5.09)**; block-bootstrap 95% CI [+0.35%, +0.77%],
+  0% of 2,000 draws ≤ 0.
+- Concurrency-capped portfolio (equal-weight slots, idle capital earns 0%,
+  10bp cost already in the returns above):
+
+  | n_slots | accepted | CAGR | Sharpe | max DD | final |
+  |---|---|---|---|---|---|
+  | 5 | 800/837 (96%) | +22.80% | 2.53 | −20.20% | 9.99x |
+  | 10 | 837/837 (100%) | +11.62% | 2.54 | −10.57% | 3.43x |
+  | 15 | 837/837 (100%) | +7.62% | 2.54 | −7.15% | 2.28x |
+  | 20 | 837/837 (100%) | +5.67% | 2.54 | −5.40% | 1.86x |
+
+  Nearly full acceptance even at 5 slots confirms the step-D finding above:
+  realized concurrency on the causally-confirmed sample is far below the
+  original hindsight-inflated p90=10/max=24 figure (`strategies/five_day_bounce/NOTES.md`),
+  so CAGR falling as `n_slots` rises is mostly idle capital, not skipped
+  trades — Sharpe stays ~2.5 across every slot count. Output:
+  `data/causal_full_combined.csv`, `data/portfolio_equity_stats_combined.csv`.
+
+Published to the artifact (`[[reference-five-day-bounce-doc]]`, version 5,
+2026-09-15) as the "Expected results" and "How much money" figures,
+replacing the original hindsight-based +1.04%/+0.98% and ~240 signals/yr
+numbers.
+
 ## Open threads / next steps
 
 **Where this stands as of 2026-07-21.** The levels were pursued to feed the
