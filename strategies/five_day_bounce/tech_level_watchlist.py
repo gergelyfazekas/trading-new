@@ -81,6 +81,8 @@ DISPLAY_AGE_CUTOFF_DAYS = 10
 # tech_levels_notes.md, 2026-09-19 "post-birth bounce" section. Roughly the
 # backtest median (0.73-0.74% on ticker_list/oos); used here purely to tag
 # BUY/HELD rows "small"/"large" for reference, never to filter or decide.
+# REMEMBER: SMALL is the good sign for a buy (a small post-birth bounce
+# preceded better trades); LARGE is the unfavorable side.
 BOUNCE_REF_PCT = 0.0075
 
 STATUS_LABEL = {"buy": "BUY", "held": "HELD", "sell": "SOLD", "watch": "watch"}
@@ -153,7 +155,8 @@ def main():
                      f"({row['ret']:+.1%}), held {int(row['days_held'])}d ({row['reason']})")
 
         if row["event"] in ("buy", "held", "sell") and pd.notna(row.get("bounce_1d")):
-            tag = "small" if row["bounce_1d"] < BOUNCE_REF_PCT else "large"
+            tag = ("small = favorable" if row["bounce_1d"] < BOUNCE_REF_PCT
+                   else "large = unfavorable")
             bounce_note = f"bounce_1d={row['bounce_1d']:+.1%} ({tag}, experimental)"
             note = f"{note} | {bounce_note}" if note else bounce_note
 
