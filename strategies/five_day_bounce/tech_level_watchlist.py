@@ -17,13 +17,26 @@ sorted table:
      (blank if no resistance was active at entry -- exits on HOLD_DAYS only).
   3. SOLD -- exited on the latest run. NOTE shows entry/exit price, realized
      return, days held, and why (hold_days or resistance).
-  4. everything else ("watch"), split into two groups: supports with
-     AGE < MAX_AGE_DAYS (still inside the rule's age window -- can still fire
-     on a future run if price closes into BUY BAND) sort above supports with
-     AGE >= MAX_AGE_DAYS (aged out for good; that specific level can never
-     fire again, see tech_levels_notes.md's level-age finding). Within each
-     group, rows are ordered by DIST ascending, closest to firing first.
-     A ticker with no support currently tracked sorts last.
+  4. everything else ("watch"), split into two groups for display ordering
+     only: supports with AGE <= DISPLAY_AGE_CUTOFF_DAYS sort above supports
+     with AGE > DISPLAY_AGE_CUTOFF_DAYS. This grouping is purely cosmetic and
+     is separate from MAX_AGE_DAYS, the live rule's actual age window (see
+     "zone, aged out" below, and tech_levels_notes.md's level-age finding).
+     Within each group, rows are ordered by DIST ascending, closest to firing
+     first. A ticker with no support currently tracked sorts last.
+
+Every BUY/HELD/SOLD row also gets a `bounce_1d=...` tag in NOTE -- the
+next-day return after the triggering level's birth date (logged by
+tech_level_continuation_live.py's bounce_1d_after_birth, purely diagnostic,
+never used in the buy/sell decision, carried through the position's life
+once opened). Tagged "small"/"large" against BOUNCE_REF_PCT, an
+experimental reference point (not a validated threshold):
+tech_levels_notes.md's 2026-09-19 "post-birth bounce" section found a
+SMALLER post-birth bounce empirically preceded better subsequent trades on
+both ticker_list and oos, but also that gating on it would have cut total
+realized CAGR roughly in half at every capital-slot count tested (the
+discarded half was still solidly profitable) -- shown here for reference
+only, not as a signal to act on.
 
 A "watch" row whose price already sits inside BUY BAND but is aged out gets a
 "zone, aged out" NOTE instead of being shown as BUY -- that combination is
@@ -58,6 +71,18 @@ from tech_level_continuation_live import LIVE_TICKERS, MAX_AGE_DAYS, NEAR_PCT, H
 
 SIGNAL_LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "continuation_signal_log.csv")
 
+# Display-only ordering cutoff: within the "watch" group, supports with age <=
+# this many days sort above older ones. This is independent of MAX_AGE_DAYS
+# (imported above), which governs actual buy-signal eligibility in the live
+# script and must not be changed for display purposes.
+DISPLAY_AGE_CUTOFF_DAYS = 10
+
+# Experimental reference point only, not a validated threshold -- see
+# tech_levels_notes.md, 2026-09-19 "post-birth bounce" section. Roughly the
+# backtest median (0.73-0.74% on ticker_list/oos); used here purely to tag
+# BUY/HELD rows "small"/"large" for reference, never to filter or decide.
+BOUNCE_REF_PCT = 0.0075
+
 STATUS_LABEL = {"buy": "BUY", "held": "HELD", "sell": "SOLD", "watch": "watch"}
 STATUS_RANK = {"buy": 0, "held": 1, "sell": 2, "watch": 3}
 
@@ -82,7 +107,7 @@ def main():
     latest.loc[(latest["event"] == "buy") & (latest["provisional"] == True), "note"] = "provisional"  # noqa: E712
 
     latest["rank"] = latest["event"].map(STATUS_RANK).fillna(3)
-    latest["eligible"] = latest["support_age_days"] < MAX_AGE_DAYS
+    latest["eligible"] = latest["support_age_days"] <= DISPLAY_AGE_CUTOFF_DAYS
     latest = latest.sort_values(
         ["rank", "eligible", "dist"], ascending=[True, False, True]
     )
@@ -126,6 +151,12 @@ def main():
         elif row["event"] == "sell":
             note = (f"entry {row['entry_price']:.2f} -> exit {row['exit_price']:.2f} "
                      f"({row['ret']:+.1%}), held {int(row['days_held'])}d ({row['reason']})")
+
+        if row["event"] in ("buy", "held", "sell") and pd.notna(row.get("bounce_1d")):
+            tag = "small" if row["bounce_1d"] < BOUNCE_REF_PCT else "large"
+            bounce_note = f"bounce_1d={row['bounce_1d']:+.1%} ({tag}, experimental)"
+            note = f"{note} | {bounce_note}" if note else bounce_note
+
         print(f"{marker} {ticker:6} {status:6} {price:>9} {level:>15} {buy_band:>15} {dist:>7} {age:>5}  {note}")
 
 

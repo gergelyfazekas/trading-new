@@ -1250,7 +1250,297 @@ Published to the artifact (`[[reference-five-day-bounce-doc]]`, version 5,
 replacing the original hindsight-based +1.04%/+0.98% and ~240 signals/yr
 numbers.
 
-## Open threads / next steps
+## Automating the near-close execution timing decision (2026-09-16)
+
+The 2026-09-08 "Execution timing decision" above was manual: watch price a
+few minutes before close and buy by hand if conditions were met, without
+touching `tech_level_continuation_live.py`'s 08:00 CEST record. That's now
+automated. `tech_level_continuation_live.py` gained a `--near-close` mode,
+scheduled at 21:40 local (~15:40 ET, 20 min before the 16:00 ET close) via
+`run_live_log_near_close.sh` / `com.gergelyfazekas.techlevelnearclose.plist`,
+alongside — not instead of — the existing 08:00 job.
+
+Mechanics: `--near-close` uses the still-forming intraday bar as the day's
+close, refusing to run outside a 15:15-16:10 ET window
+(`in_near_close_window`) so a misfired or manually re-run invocation can't
+log a mid-session price as if it were near the close. Every row it writes is
+flagged `price_estimated=True`. The next 08:00 run then finds that row for
+each ticker and corrects only its `price` to the now-settled close, clearing
+the flag — it does **not** re-run buy/sell/hold logic or touch
+`continuation_positions.json` for that ticker, since the decision (and any
+position it opened) already happened at 21:40 and re-evaluating it against
+the same position state would double-count `days_held` or re-trigger an
+already-acted-on buy. If the evening run fails outright (network, window
+guard), the morning run silently falls through to a full evaluation for that
+ticker exactly as it always has — the estimate is a same-day head start, not
+a dependency.
+
+This inherits the risk the 2026-09-08 note already flagged, now on every
+name instead of just the ones checked by hand: the entry distance test and
+`mark_broken`'s break check both depend on today's settled close, so the
+final ~20 minutes can still flip a name in or out of the buy zone, or
+through it into "broken." No new mitigation was added beyond what already
+existed (comfortable zone distance rather than a right-at-the-edge one,
+skipping known-catalyst days) — those are judgment calls the automation
+doesn't make, so anything it flags right at the 1% edge or on an
+earnings/macro day is worth a second look before acting, same as before.
+
+A macOS notification (`osascript display notification`) fires from the
+`--near-close` run with the buy list or "nothing to buy" — the point of
+running before close is to see it in the moment, not read a log afterward.
+
+## A silent log-overwrite bug, and the near-close schedule moved to 21:35 (2026-09-19)
+
+Prompted by the user noticing the watchlist sometimes showed a ticker as
+bought (`HELD`) with no `BUY` ever having appeared for it. Confirmed real,
+not a misreading: `continuation_positions.json` correctly showed MSFT
+entered 2026-09-17 and HON/ABT entered ~2026-09-15, but
+`continuation_signal_log.csv` had no `buy` row at all for any of them —
+their logged history jumps straight from `watch` to `held`. Cross-checked
+against `~/Library/Logs/tech_level_near_close.log`: the 2026-09-17 21:40
+run's own stdout shows the MSFT buy firing and printing correctly
+(`BUY: MSFT @ 496.77 ... [PROVISIONAL]`) and exiting 0. So the decision and
+the position were both right — the human-facing record of it wasn't.
+
+**Root cause.** `continuation_signal_log.csv` is upserted keyed only on
+`(as_of, ticker)` (`append_rows`, key_cols=['as_of','ticker']). The next
+default (morning) run calls `_correct_estimate()` to find and price-correct
+the prior evening's `price_estimated=True` row for that key. If that lookup
+fails to match for any reason, the code falls through to a fresh
+`evaluate_ticker()` call for the *same* `(as_of, ticker)` — and since the
+ticker is already in `positions`, that produces a `held` row, which then
+silently overwrites the original `buy` row via the upsert, because nothing
+checked whether that day already had a decisive event logged. This
+contradicts the module's own stated invariant ("never regenerate a past
+row") — the invariant was only enforced for the specific price-correction
+path, not in general. Exactly why `_correct_estimate` failed to match on
+these particular evenings wasn't pinned down (the code was mid-development —
+`git status` showed `tech_level_continuation_live.py` as locally modified,
+uncommitted, at the time), but the structural gap is real regardless of the
+trigger.
+
+**Fix:** added `_already_logged(existing_log, ticker, as_of)` to
+`tech_level_continuation_live.py`. In the default run's per-ticker loop, if
+`_correct_estimate` doesn't match but a row for `(as_of, ticker)` already
+exists in the log (from *any* prior run that day), the ticker is skipped
+entirely — no `evaluate_ticker()` call, no positions mutation, no log
+write — rather than falling through to a fresh evaluation that could
+overwrite an already-decided day. Verified against the real log/positions
+files that `_already_logged` and `_correct_estimate` classify existing rows
+correctly. Not yet committed.
+
+**Not backfilled:** the erased `buy` rows for MSFT (2026-09-17) and HON/ABT
+(~2026-09-15) are still missing from `continuation_signal_log.csv`. Left as
+an open item rather than silently rewritten, per this file's own
+never-regenerate-a-past-row rule for that CSV — restoring them (from the
+notification log's printed values) is a deliberate one-time repair the user
+would need to ask for explicitly, not something to do implicitly while
+fixing the code path that caused it.
+
+**Also changed:** the `--near-close` launchd schedule
+(`com.gergelyfazekas.techlevelnearclose.plist`) moved from 21:40 to 21:35
+local (Europe/Budapest), Mon–Fri, at the user's request. Still ~15:35 ET,
+comfortably inside the existing 15:15–16:10 ET `in_near_close_window` guard,
+which was left unchanged. Job was unloaded/reloaded via `launchctl
+bootout`/`bootstrap` so the new time is already live, not just written to
+the plist. `run_live_log_near_close.sh` and
+`tech_level_continuation_live.py`'s docstring/comments updated to match
+(21:35 / ~15:35 ET) so they don't keep describing the old time.
+
+## Confluence check: does agreement between the level rule and the placebo mean anything? (2026-09-19)
+
+Follow-up to the 2026-09-15 placebo finding (step C above): requiring a
+two-touch technical level adds no measurable edge over a bare, unmatched
+local low. Natural next question: when the two entry conditions *agree* —
+the same (ticker, date) satisfies both the real technical-level rule and
+the bare-local-low placebo on the same day — is that a stronger signal than
+either alone? Built `strategies/five_day_bounce/tech_level_confluence_check.py`
+to test this directly, reusing the exact causal entry/exit machinery from
+steps A/C (no shortcuts).
+
+Refactored `tech_level_causal_check.build_placebo_candidates` first: split
+out `placebo_raw_days()`, the day-level bare-local-low condition with no
+one-position-at-a-time blocking, since checking "does the real condition
+also hold on this exact day" against the *blocked* candidate list would be
+distorted by an unrelated earlier candidate's hold window still being open.
+Verified behavior-preserving (candidate counts, ordering, and membership all
+matched the pre-refactor function on a real ticker) before using it.
+
+Two framings of the same underlying overlap, run from each side:
+
+- **Framing 1** (from the real side): tag each of the 837 causally-confirmed
+  real trades with whether `placebo_raw_days` also flags its exact entry
+  date. Split BOTH vs REAL-ONLY.
+- **Framing 2** (from the placebo side): build the *full, unsampled*
+  placebo population — every day `build_placebo_candidates` would accept,
+  not step C's per-ticker-count-matched subsample — and tag each with
+  whether the real technical-level condition also holds. Split BOTH vs
+  PLACEBO-ONLY. (The full population is ~2x the size of the real trade
+  set: 1705 vs 837 combined — step C's subsampling for an apples-to-apples
+  aggregate comparison had been quietly understating how much larger the
+  raw local-low population actually is.)
+
+**Result: confluence does not produce a stronger signal — if anything, it's
+weaker, and on `ticker_list` specifically it's statistically indistinguishable
+from zero.**
+
+| | n | mean excess | t | block-boot 95% CI |
+|---|---|---|---|---|
+| ticker_list, Framing 1: BOTH | 143 | +0.24% | 0.92 | [−0.28%, +0.79%] |
+| ticker_list, REAL-ONLY | 201 | +0.72% | 3.70 | [+0.44%, +1.02%] |
+| ticker_list, Framing 2: BOTH | 226 | **+0.09%** | **0.42** | **[−0.38%, +0.51%]** |
+| ticker_list, PLACEBO-ONLY | 453 | +0.69% | 4.58 | [+0.41%, +0.89%] |
+| oos, Framing 2: BOTH | 339 | +0.60% | 3.37 | [+0.32%, +0.87%] |
+| oos, PLACEBO-ONLY | 687 | +0.61% | 4.24 | [+0.33%, +0.91%] |
+| combined, Framing 2: BOTH | 565 | +0.39% | 2.87 | [+0.18%, +0.61%] |
+| combined, PLACEBO-ONLY | 1140 | +0.64% | 6.10 | [+0.46%, +0.84%] |
+
+Only 33–44% of trades on either side actually overlap — confluence is the
+minority case, not the typical one. On `ticker_list`, the confluence subset
+(a local low that also happens to have formed a validated two-touch level)
+is a *worse* signal than a local low without one (t=0.42 vs t=4.58) — the
+opposite of the intuition that agreement between two independent-looking
+signals should mean higher conviction. On `oos` the two are statistically
+tied, so this isn't confirmed on both universes and shouldn't be over-read
+as a general rule on its own.
+
+**Checked before trusting the ticker_list result:** the confluence bucket's
+near-zero mean is spread across 40/41 tickers (not 1-2 outliers) and is
+small-and-mixed-sign across most years (median +0.23%, trimmed mean +0.16%,
+both close to the pooled +0.09% mean) — not an artifact of a handful of bad
+trades or one bad year.
+
+**Reading this together with the whole arc:** the technical-level
+requirement has now failed to add value three ways — it doesn't beat a bare
+local low in aggregate (step C), it doesn't identify the strongest subset of
+local lows (this section), and on ticker_list agreement between the two
+weakly predicts a *worse* outcome. None of this overturns the underlying
+effect itself, which keeps surviving every cut (causal entry+exit,
+block-bootstrap, cluster SE, this confluence split) — it sharpens the
+conclusion that the real mechanism is short-horizon reversal off a recently
+confirmed local low, and "technical level" is descriptive color on top of
+it, not a load-bearing part of the edge. Not yet done: parameter-neighborhood
+sweep, cost breakeven, and concentration checks for the bare-local-low rule
+on its own (step 07-equivalent scrutiny) — it has a good point estimate and
+more data than the level-gated rule, but hasn't been stress-tested nearly as
+hard, so it isn't a validated replacement for what's live yet. Scripts:
+`strategies/five_day_bounce/tech_level_confluence_check.py`. Outputs (all
+regenerable, untracked): `data/confluence_real_labeled_{ticker_list,oos}.csv`,
+`data/confluence_full_placebo_{ticker_list,oos}.csv`,
+`data/confluence_both_combined.csv`.
+
+## Parameter-neighborhood and cost sensitivity for the bare-local-low rule -- and a real causality catch along the way (2026-09-19)
+
+Requested directly: give the placebo/bare-local-low rule the same step-07-style
+stress test the real technical-level rule got, with an explicit instruction to
+verify every cell is causal and uses no more data than would be available
+live -- prompted by the `distance=10` parameter's role in `find_peaks`.
+Built `strategies/five_day_bounce/tech_level_placebo_sensitivity.py`.
+
+### The causality audit itself
+
+Entry side (trough confirmation) was already fixed to be genuinely causal on
+2026-09-15 (truncate-and-rerun find_peaks, not a fixed lag) -- re-verified,
+not a new finding. The exit side was the open question: `causal_exit`
+(`tech_level_causal_check.py`) freezes the resistance level at entry and
+never rebuilds it, which its own docstring calls "provably exact" only
+because `hold_days=5 < distance=10` -- no touch unconfirmed at entry can
+become confirmable before the hold ends. A hold_days sweep reaching 10, or a
+distance sweep going below 5, breaks that guarantee outright.
+
+Built `causal_exit_full()`, which rebuilds the resistance target from data
+truncated to *that day* on every day of the hold instead of freezing it.
+Validated against the frozen shortcut at hold_days=5 and 7 (where "exact"
+is supposed to hold): **95-97% exact agreement, not 100%.** Investigated the
+mismatches directly -- they are not a lookahead leak (both functions only
+ever use data available as of the day being decided) but a mechanism the
+original "exact" proof never considered: `tech_levels.mark_broken()` can
+retire a resistance level *during* the hold (price fully crosses it) even
+when no *new* level gets confirmed. The frozen shortcut keeps checking the
+entry-day resistance object forever, blind to it having since broken;
+`causal_exit_full` correctly drops it and looks for the next-nearest valid
+one. **This is a small fidelity gap, not a leak -- but it means the
+"provably exact" claim was never fully accurate, and it silently affects
+the already-published real-rule Step A numbers at hold_days=5 too, not
+just this file's placebo work.** At the one cell where it was checked
+against the aggregate conclusion (hold_days=10 boundary, near_pct=1%,
+ticker_list), the gap didn't matter: frozen gave n=667, −0.04% (t=−0.24);
+fully-causal gave −0.01% (t=−0.05) -- same qualitative "flat" read either
+way.
+
+**A real performance trap, also caught before it wasted hours:** the first
+version of the grid recomputed the entire trough-detection-and-confirmation
+walk from scratch on every one of 25 near_pct x hold_days cells, even though
+that walk doesn't depend on either parameter -- 25x redundant work. A single
+(near_pct=3%, hold_days=10) cell hadn't finished in 8+ minutes before being
+killed; the full grid at that rate would have taken hours. Fixed by
+splitting `placebo_trough_confirmations()` out of `placebo_raw_days()` in
+`tech_level_causal_check.py` so it can be computed once per ticker and
+reused across a whole sweep -- cut the confirmation-walk cost for all 41
+`ticker_list` tickers combined to under 1 second. The remaining cost (still
+substantial -- the full `ticker_list` run took ~50 minutes) is real,
+necessary work: candidate counts genuinely range from ~260 (near_pct=0.5%)
+to ~5,900+ (near_pct=3%, hold=1) per cell, each needing its own
+`build_levels` call.
+
+### Results (ticker_list; the `oos` universe run was started but stopped
+### before finishing at the user's request -- not yet confirmed there)
+
+**Parameter-neighborhood grid** (hold_days in {1,2,3,5,7}, all safely
+< distance=10, cheap frozen exit): positive excess across the *entire*
+near_pct x hold_days neighborhood, strengthening with looser near_pct and
+generally peaking around hold_days=5:
+
+| near_pct \ hold | 1d | 2d | 3d | 5d | 7d |
+|---|---|---|---|---|---|
+| 0.5% | +0.25 (2.9) | +0.24 (1.9) | +0.36 (2.3) | +0.17 (0.7) | −0.21 (−0.8) |
+| 1.0% | +0.29 (5.7) | +0.39 (5.5) | +0.53 (6.0) | +0.49 (4.0) | +0.22 (1.6) |
+| 1.5% | +0.24 (10.2) | +0.38 (11.4) | +0.53 (12.8) | +0.67 (12.0) | +0.54 (8.1) |
+| 2.0% | +0.23 (11.8) | +0.40 (14.2) | +0.55 (15.7) | +0.71 (15.1) | +0.60 (10.9) |
+| 3.0% | +0.21 (12.8) | +0.40 (16.4) | +0.56 (17.1) | +0.73 (16.6) | +0.65 (12.7) |
+
+**Cost sensitivity** (near_pct=1%, hold=5): still positive at every cost
+tested, including 50bp round-trip (+0.09%, t=0.76) -- breakeven sits above
+50bp, more comfortable than the real rule's ~35-50bp (step 07).
+
+**Distance sensitivity -- the important one** (near_pct=1%, hold=5,
+distance in {3,5,10,15,20}; 3 and 5 needed the fully-causal exit since
+hold_days=5 isn't strictly less than either):
+
+| distance | 3 | 5 | 10 | 15 | 20 |
+|---|---|---|---|---|---|
+| mean excess | −0.21% (t=−2.21) | −0.28% (t=−2.90) | +0.49% (t=3.98) | +1.00% (t=6.66) | +1.30% (t=7.39) |
+
+**A monotonic, unbroken climb from negative to strongly positive as
+`distance` increases, with no sign of leveling off even at distance=20.**
+This is the same shape as the width-inflation artifacts this project has
+already caught and rejected twice (KO on `tech_width`, CSCO on the same) --
+a parameter whose apparent edge just keeps climbing as it's loosened is a
+classic sign the metric is trivially rewarding pickier/larger, higher-
+prominence setups rather than reflecting a stable, real effect at any one
+setting. This directly answers the original worry about the `distance=10`
+parameter: not a lookahead leak (ruled out above), but a live, unresolved
+robustness problem -- the bare-local-low rule's edge is highly sensitive to
+exactly which `distance` was chosen, in a way that looks like an artifact,
+not a validated feature of the fixed a-priori combo the way `tech_width` was
+shown to be (step 02, "tight range immune to a width-inflation artifact
+found earlier"). **This is a genuine, additional reason for caution about
+the bare-local-low rule specifically, on top of it simply not having been
+stress-tested as long as the live rule** -- it doesn't touch the live
+technical-level rule's own validation, which uses the same `distance=10`
+but was separately checked for this exact artifact shape in earlier work.
+
+**Not yet done:** confirming the distance-sensitivity shape reproduces on
+the `oos` universe (interrupted before that ran) -- reproducing out of
+sample is exactly the kind of check that has separated real findings from
+artifacts throughout this project (DHR/MMM's survival vs. KO's failure),
+so this shape should be treated as a strong caution flag, not a confirmed
+verdict, until that's checked. Scripts:
+`strategies/five_day_bounce/tech_level_placebo_sensitivity.py`. Outputs
+(regenerable, untracked): `data/placebo_sensitivity_grid_ticker_list.csv`,
+`data/placebo_sensitivity_boundary_ticker_list.csv`,
+`data/placebo_cost_sensitivity_ticker_list.csv`,
+`data/placebo_distance_sensitivity_ticker_list.csv`.
 
 **Where this stands as of 2026-07-21.** The levels were pursued to feed the
 forecasting pipeline (`forecasting_notes.md`). They did not make it in: the
@@ -1311,3 +1601,430 @@ the trade-level P&L section, then the time-proxy test.
   inadvertently filtered on "young." A result that survives year/stock/outlier
   checks can still be measuring a completely different mechanism than the one
   it was designed to test.
+
+## Walk-forward chart demo, and a search for what separates winners from losers (2026-09-19)
+
+Started from a visual request: a genuine day-by-day walk-forward simulation
+on one random stock (`strategies/five_day_bounce/tech_level_walkforward_demo.py`)
+-- levels recomputed from scratch on the truncated series at *every single
+day* via `tech_level_continuation_live.evaluate_ticker()` itself (not a
+whole-history build), so the signal set matches what a live script could
+actually have seen. Charts previous/next 10 trading days around each buy
+with the triggering support/resistance bands and a volume subplot
+(birth/buy day highlighted, ratio to trailing 10d average annotated) drawn
+on top; one combined CSV per ticker (`<TICKER>_walkforward_events.csv`,
+long-format, `event_id` ties every row back to its chart) so an impression
+from a chart can be checked against the exact underlying numbers later
+without re-pulling data. First run: AMZN, 18 buy signals across 2015-2026.
+
+Looking at those charts raised the obvious question this section is about:
+the level itself looks reasonable in every case, but some trades bounce for
+a real profit and some just slide through -- is there information available
+*at entry time* that tells the two apart? Tested four families of candidate
+covariates against the already-live young-level (`support_age_days<5`,
+`near_pct=1%`, `hold_days=5`) rule's trade population, always with the same
+discipline this file has learned to require the hard way: equal-sized
+quantile buckets instead of a swept threshold (nested, shrinking-n subsets
+mechanically produce a smooth-looking curve regardless of whether anything
+real is there -- see the volume section below for where this bit us), a
+Bonferroni bar when multiple windows/variants are tested at once, and a
+placebo/random-entry specificity check on top of correlation, since a real
+rank correlation can still just be generic market microstructure
+(short-horizon reversal, drift) rather than anything specific to this
+setup. All of it built in a new, isolated sandbox --
+`strategies/five_day_bounce/experiments/volume_gated_levels/` -- that only
+*imports* `tech_levels.py`/`tech_level_naive_strategy.py`/
+`tech_level_continuation_live.py` read-only; nothing live was touched.
+
+**Caveat that applies to this entire section:** all of it was tested against
+the two-touch technical-level version of the young-level rule (what's
+actually live), using `build_levels_causal`/`mark_broken` exactly as
+`tech_level_naive_strategy.py` does. The section immediately above this one
+(Confluence check, same day) and the causal-check step-C finding
+(2026-09-15) both independently concluded the two-touch level requirement
+itself adds nothing over a bare confirmed local low. This section's
+findings should be read as "true of the rule as currently live," not
+necessarily as "true of the underlying reversal mechanism" -- re-running the
+strongest finding below (`market_depth_10d`) against the bare-local-low
+population instead would be the natural way to check which of those it is.
+
+### Birth-day volume: looked promising, then didn't survive a properly-designed test
+
+First hypothesis: does a level born on unusually high volume matter more?
+Built `build_levels_causal_volume_gated` (birth blocked unless that day's
+volume >= `min_ratio` x its own trailing-10-day average) as a standalone
+copy-and-modify next to the real `build_levels_causal`. At `min_ratio=1.0`,
+full `ticker_list`, full history: the gated arm looked like a real
+improvement over the ungated young-level rule (n=970 vs 1152, mean excess
++1.13% vs +1.02%, 40/41 stocks positive, placebo lift +1.18pp/t=8.65).
+
+**A threshold sweep (0.0 to 2.0) exposed the problem before it got
+trusted.** Mean excess climbed close to monotonically as the threshold
+tightened (+1.02% -> +1.40% at 1.5), which is exactly the shape this file's
+`tech_width` width-inflation artifact already taught to distrust -- except
+here the sweep's points are *nested* subsets of each other (a stricter
+threshold's trades are a subset of a looser one's), so a smooth curve is
+almost guaranteed by construction regardless of whether the underlying
+relationship is real, and n collapsed from 1152 to 121 at the tightest
+threshold, which also lets a falling t-stat look like "rarer but more
+informative" even under pure noise. The user caught this ambiguity directly
+and asked for the properly-controlled version: independent, **equal-sized**
+quantile buckets (no shrinking-n confound) plus a direct rank correlation.
+**Result: no relationship at all** (Spearman rho=0.022, p=0.45, n=1152) --
+every quintile bucket, including the *lowest*-volume one, beat the placebo
+baseline by a similar wide margin (Q1 t=6.0, Q5 t=4.1, no monotonic
+ordering). **Verdict: the sweep's apparent improvement was the shrinking-
+nested-subset artifact, not a real dose-response** -- birth-day volume does
+not predict trade quality. Scripts: `run_experiment.py` (small sample),
+`run_experiment_full.py` (full scale + age-gated arm), `run_sweep.py`
+(the threshold sweep), `run_dose_response.py` (the corrected test).
+
+### Momentum ("company mood") and dip depth: two real, specific signals
+
+Same equal-bucket + Bonferroni + placebo-specificity design applied fresh
+(not as a correction) to two feature families, all trailing/causal windows
+ending the day *before* entry so they can't mechanically restate the
+entry rule's own required dip toward the band:
+
+- **`rel_mom_5d`** (stock's own 5-day return minus the equal-weight book's):
+  survived a 12-feature Bonferroni bar (rho=-0.122, p=0.00003), a clean
+  monotonic bucket staircase (+1.51% -> +0.77% excess, Q1 to Q5, stable
+  n~230/bucket), and -- the decisive check -- **placebo-null**: real
+  rho=-0.122 (p<0.0001) vs. a matched random-entry placebo's rho=-0.010
+  (p=0.74). Not generic reversal; specific to buying near a fresh support
+  level. `market_mom_10d` also survived Bonferroni but its bucket shape was
+  non-monotonic (a dip at Q3) -- treated as weaker, second-tier.
+- **`market_depth_10d`/`market_depth_20d`** (how far the *equal-weight book
+  itself* sits below its own recent high -- "market mood" rather than
+  company mood): the cleanest result of the whole investigation. Perfectly
+  monotonic staircases (market_depth_10d: +1.36% t=9.1 at Q1 down to +0.73%
+  t=2.2 at Q5), placebo-null (real rho=-0.116 vs. placebo rho=+0.017), and
+  stronger than every company-level feature tested. Raw, non-relative
+  `stock_depth_*` (how far the *stock itself* fell, without netting out the
+  market) showed no signal at all -- only the market-relative/market-level
+  framing carries information, not the stock's own absolute decline.
+  Scripts: `run_momentum_mood.py`, `run_momentum_specificity_check.py`,
+  `run_dip_depth.py`.
+
+### Stacking as a hard gate: real but doesn't clear the strict bar either universe
+
+Tested both `rel_mom_5d<0` and `market_depth_10d<0` (a-priori zero cutoffs,
+not fitted) stacked on top of the live young-level rule, against the
+DHR/MMM-style bar (worst-case delta across independent periods must be
+positive, not just the pooled average):
+
+| filter | universe | pooled: unfiltered -> filtered | placebo lift | period stability |
+|---|---|---|---|---|
+| `rel_mom_5d<0` | ticker_list | +1.02% (n=1152) -> +1.10% (n=896) | +1.19pp, t=9.89 | 3/4 positive, worst -0.03% (near-flat) |
+| `market_depth_10d<0` | ticker_list | +1.02% -> +1.36% (n=224) | +1.43pp, t=6.84 | 3/4 positive, worst -0.22% (real dip) |
+| `market_depth_10d<0` | **oos (-NVDA)** | +0.99% (n=1703) -> +1.20% (n=340) | +1.25pp, t=6.28 | 3/4 positive, worst -0.09% |
+
+The OOS run first confirmed the *base* young-level rule replicates cleanly
+outside `ticker_list` (+0.99%, lift +1.01pp/t=10.49 -- matches ticker_list's
++1.02% closely). The `market_depth_10d` gate then repeated a strong, broad
+(50/59 stocks, 85%, positive) pooled improvement on a genuinely disjoint
+universe -- but the one weak period is a *different* calendar window on
+`ticker_list` (2015-2017) than on OOS (2018-2020), which is more consistent
+with ordinary sampling noise across many period-checks than with a shared
+structural flaw. Neither the age-only pattern from earlier sections nor
+either of these filters has yet produced the fully-clean "positive in every
+cutoff, both universes" result DHR/MMM cleared. In every split tested here
+the *excluded* group stayed clearly profitable (t>2 always) -- these
+covariates modulate the size of the edge, they don't separate winners from
+losers into a good group and a bad one. Scripts: `run_stacking_test.py`,
+`run_stacking_test_market_depth.py`, `run_oos_validation.py`.
+
+### Symmetry check: is there a genuinely bad regime, not just a weaker one?
+
+Asked directly, since every split so far had a "worse but still positive"
+shape rather than a real good/bad split: does performance turn genuinely
+negative when the market is volatile, or sitting near its own lows? Tested
+`market_dist_from_low_{20,60,120}d` (proximity to a longer-horizon trough)
+and `market_vol_{5,10,20}d` + a vol-spike ratio, same Bonferroni+bucket+
+placebo design.
+
+**"Near its lows" specifically: no relationship** (p=0.21-0.73 across all
+three windows). **Volatility: real, and it repeats the market_depth pattern
+exactly** -- `market_vol_5d` gives a clean monotonic staircase (+1.28% t=8.1
+down to +0.76% t=2.2), placebo-null. But **the worst bucket, at every
+window tested, never goes negative or flat** (t stays >=2.0 throughout).
+**Conclusion: this looks like a robust base effect whose magnitude degrades
+under stress but does not break** -- reassuring for the underlying
+strategy's robustness, but it means "find the regime where this clearly
+fails" is not achievable with the covariates tried so far. Script:
+`run_market_regime_extremes.py`.
+
+### Position sizing instead of gating
+
+Since the "excluded" side of every split stayed profitable, a continuous
+weight fits the data's actual shape better than a hard cutoff. Weight
+function on `market_depth_10d` (a-priori scale, not fit to outcomes): 1.0 at
+depth<=0, linearly down to a floor of 0.2 by depth=5%, never fully zeroing a
+signal out.
+
+| universe | n | avg weight | equal-size mean | weighted mean | gain | permutation p | periods positive |
+|---|---|---|---|---|---|---|---|
+| ticker_list | 1152 | 0.77 | 1.02% | 1.09% | +0.07pp | **0.006** | 3/4 |
+| oos (-NVDA) | 1703 | 0.75 | 0.99% | 1.01% | +0.03pp | 0.142 | 3/4 |
+
+Same direction, similar average capital deployed (~75-77%), and the same
+period (earliest, 2015-2018) dips slightly on both universes -- but only
+`ticker_list` clears significance; OOS does not. Smaller gain than the hard
+gate's, expected mechanically since the weight only ever moves between 0.2
+and 1.0 rather than 0 and 1 -- the price of never excluding a still-
+profitable trade. Script: `run_position_sizing.py`.
+
+### Follow-up: does market_depth_10d survive against the bare-local-low population? No.
+
+The caveat flagged at the top of this section -- everything above was
+tested on the two-touch-level population, while Step C (2026-09-15) and the
+Confluence check (earlier today) both concluded the level requirement adds
+nothing over a bare local low -- was checked directly for `market_depth_10d`
+specifically, since it was the strongest claim riding on that population.
+Built `run_market_depth_bare_local_low.py`, reusing
+`tech_level_confluence_check.build_full_placebo_trades` (the full, unsampled
+bare-local-low population, causal entry+exit, no band/level machinery at
+all) instead of `build_levels_baseline`/`simulate_age_gated`.
+
+**The finding does not replicate. At all.**
+
+| universe | n | Spearman rho | p | bucket shape |
+|---|---|---|---|---|
+| ticker_list | 677 | +0.029 | 0.46 | flat/noisy (0.35% -> 0.44% -> 0.39% -> 0.83% -> 0.47%, no trend) |
+| oos (-NVDA) | 1023 | +0.000 | 0.99 | flat/noisy (0.50% -> 0.71% -> 0.78% -> 0.80% -> 0.23%, no trend) |
+
+Compare the two-touch-level population's clean, monotonic staircase on the
+same feature (rho=-0.116 to -0.118, p<0.0002, both universes, every window).
+This is not a weaker echo of that result -- it is a clean null, on both
+universes, with no resemblance in shape. The specificity placebo (random
+entries at the same frequency) is equally null here too, so nothing is being
+masked by a confound in the opposite direction either.
+
+**Reading -- corrected after pushback (see below): this is NOT proof that
+the two-touch-population result is fake, and it was wrong to first write it
+up that way.** The two-touch filter exists specifically to trade a
+different, deliberately narrower population than "any local low" (only
+~33% overlap with the bare-local-low set, matching the Confluence check's
+33-44% figure) -- a covariate that only ever gets checked against the
+population someone actually intends to trade, and that replicates
+out-of-sample on that population (the OOS gate run did show matching
+direction/magnitude/breadth), is real, actionable evidence *for that
+population*, whether or not the same covariate does anything on a
+population nobody plans to trade. The bare-local-low null does not
+disqualify the two-touch finding.
+
+What it DOES do: remove the main reason this file was leaning toward
+optimism about it. The argument for trusting `market_depth_10d` rested
+heavily on "clean, monotonic, placebo-null, cross-universe" as a stand-in
+for "this is a real, general regime mechanism, not noise." If it were a
+general "buying dips works better when the market is calm" mechanism, some
+weaker version of it should show up in the broader bare-local-low
+population it was carved from -- finding *exactly* zero there, not just a
+noisier or smaller version, is more consistent with "this filtered slice
+happened to correlate with market regime for reasons that don't generalize"
+than with "the general mechanism is real and the filter just cleans it up."
+That's a reason for *lower prior confidence* in the two-touch-specific
+result, not a disqualification of it.
+
+**The more decisive fact, unrelated to this bare-local-low question at all:
+the two-touch stacking test already had a real weakness on its own terms.**
+Both universes' multi-period stability check (the section above) came back
+3/4 positive, not 4/4 -- `ticker_list`'s worst period a genuine -0.22pp dip,
+OOS's a smaller -0.09pp in a *different* calendar window. That already fell
+short of the DHR/MMM bar (positive in every cutoff, both universes) this
+file requires before calling something real, independent of anything in
+this subsection. The bare-local-low check doesn't add a new disqualifying
+fact on top of that -- it just removes the "clean shape" argument that was
+being used to feel better about that pre-existing weakness.
+
+**Honest status for someone who wants to trade the two-touch strategy
+specifically: `market_depth_10d` plausibly helps it -- direction and
+magnitude replicate OOS -- but it hasn't cleared this project's own bar for
+"real," for a reason (period instability) that has nothing to do with
+levels vs. local lows.** If this is worth pursuing further, the useful next
+checks are ones that speak to the two-touch population directly: a
+concentration report (is the effect a handful of tickers/periods, the same
+check already run for the causal-check survivors) and a candidate mechanism
+for *why* market regime would interact with two-touch confirmation
+specifically (e.g., calm markets may produce more genuine range-bound
+double-bottoms, while a two-touch pattern confirmed during a market
+correction may often be a failed-bounce-in-a-downtrend in disguise) --
+not another population-comparison sweep. Script:
+`run_market_depth_bare_local_low.py`. Outputs:
+`bare_local_low_{ticker_list,oos}_trades.csv`.
+
+### Two more candidates, tested against both populations from the start: VIX and candle shape
+
+Applied the lesson from the `market_depth_10d` episode immediately, instead
+of as a follow-up correction: every feature below was checked against BOTH
+the two-touch and bare-local-low populations, on BOTH `ticker_list` and
+`oos`, in one pass. Two genuinely new sources of information, not another
+reslicing of the same close/volume series already picked over above:
+
+- **VIX** (`vix_level`, `vix_chg_5d`, `vix_chg_10d`, `vix_ratio_5_60`) -- an
+  external fear gauge pulled independently via yfinance, not derived from
+  the traded universe at all, specifically to avoid the self-referential
+  construction that made `market_depth_10d` hard to interpret.
+- **Candle shape on the touch day** (`clv_entry`, `clv_prev_day`,
+  `range_ratio_entry`) -- close-location-value ((close-low)/(high-low)) and
+  relative intraday range, using the High/Low columns for the first time in
+  this entire investigation; every prior script only ever used close and
+  volume.
+
+**Result: essentially nothing.** Across all 4 population x universe
+combinations (28 feature checks total), exactly one nominal Bonferroni
+survivor: `vix_chg_10d` on two-touch/`ticker_list` (rho=-0.103, p=0.0004).
+It does not replicate on two-touch/`oos` (rho=-0.035, p=0.15 -- not even
+close), the same failure-to-replicate signature that undermined
+`market_depth_10d`, except this one didn't even clear its OOS check before
+needing the bare-local-low one. Candle shape produced nothing anywhere, and
+not even consistently signed: `clv_entry`'s correlation is negative on
+two-touch/`oos` and positive on bare-local-low/`oos`, which is close to the
+signature of pure noise rather than a real effect measured with noise on
+top. **Neither the "hammer candle" intuition nor VIX-based fear timing
+shows anything worth pursuing further in this data.** Script:
+`run_vix_and_candle.py`. Outputs:
+`vix_candle_{two_touch,bare_local_low}_{ticker_list,oos}_trades.csv`.
+
+### The size of the initial bounce right after birth -- the best-behaved result of the session, and a lookahead bug caught along the way
+
+New idea: not a condition at entry, but the price action IN BETWEEN --
+after a level is born (its birth date is, by construction, a local trough:
+`find_peaks` only confirms a touch once price has moved away enough) but
+before the later retest that actually triggers the buy, price typically
+rallies some amount and then comes back down to the band. Does the SIZE of
+that initial rally predict the retest trade's outcome?
+
+**A lookahead bug on the first pass, caught before trusting it -- worth
+recording exactly how.** `bounce_5d`'s first result was rho=0.60 (p=1e-113,
+both universes) -- a correlation far too large to be real in return data,
+which is itself the tell. Cause: 60% of trades enter just 1 calendar day
+after birth (median age=1d), so a fixed "N trading days after birth" window
+for N=3 or 5 usually lands ON OR AFTER entry, reaching into the trade's own
+5-day hold period -- the "predictor" was measuring a chunk of the same
+return as the outcome. Fixed by requiring each window to resolve at or
+before the entry date, re-ran clean. `bounce_5d` turned out to have **zero**
+valid observations under that constraint (the age<5-calendar-day rule never
+leaves room for it) and `bounce_3d` almost none (n=41-64) -- both dropped
+out entirely once the leak was closed, which is itself a useful diagnostic:
+if a feature's sample collapses to near-nothing once lookahead is removed,
+the pre-fix version was almost entirely an artifact of the leak, not a
+partially-real effect.
+
+**After the fix, two candidates survive Bonferroni and replicate on both
+universes, in the OPPOSITE direction from the initial hypothesis:**
+`bounce_1d` (next-day return after birth) and `bounce_to_entry_high` (the
+full pre-retest rally, whatever it turns out to be, however many days it
+takes) -- both **negatively** correlated with the retest trade's excess
+return (rho=-0.11 to -0.17, p<1e-5, both universes). **A SMALLER initial
+bounce predicts a BETTER subsequent trade; a LARGER one predicts a WEAKER
+one.** Plausible reframing: a level retested after barely any bounce reads
+as an orderly, low-drama pullback right back to support -- consistent with
+real support holding. A level that rallies hard and then fully round-trips
+back down looks more like a failed rally that just got rejected. Since
+~60% of trades enter exactly 1 day after birth, `bounce_1d` and
+`bounce_to_entry_high` are mostly the same measurement, not two independent
+confirmations. Script: `run_post_birth_bounce.py`.
+
+**Checked against both populations from the start this time.** Bare-local-low:
+**does not replicate** (rho=+0.016/p=0.68 ticker_list, rho=+0.047/p=0.13
+oos, both features, both universes) -- the same population-specificity
+signature as `market_depth_10d`. **Multi-period stability of a
+`bounce_1d<median` gate, though, is the best of anything tested this
+session:**
+
+| universe | unfiltered -> filtered | breadth | placebo lift | period stability |
+|---|---|---|---|---|
+| ticker_list | 1.02% -> 1.29% (n=576) | 39/41 | +1.24pp, t=8.27 | **4/4 positive**, worst +0.05% |
+| oos | 0.99% -> 1.21% (n=851) | **57/59 (97%)** | +1.05pp, t=7.63 | 3/4 positive, worst -0.01% |
+
+`ticker_list` is the first result all session to clear the strict
+worst-case-positive bar outright. OOS technically misses it, but by
+-0.01pp -- noise-level, not a real reversal like `market_depth_10d`'s
+-0.09% to -0.22% dips. Breadth (97% on OOS) is the highest of anything
+tested. **Same population-specificity caveat as `market_depth_10d` applies
+-- this describes the two-touch-gated population, not the general
+reversal-off-a-local-low mechanism -- but per the corrected reading above,
+that does not disqualify it for someone trading the two-touch strategy
+specifically, and this is the closest anything has come to clearing the
+full bar on both universes at once.** Script:
+`run_post_birth_bounce_validation.py`.
+
+**Does gating on it actually make more money, though? No -- concurrency-capped
+CAGR roughly halves.** Per-trade mean excess doesn't answer "am I more
+profitable overall," since that also depends on how many trades you give up
+and whether capital would otherwise sit idle. Reused
+`tech_level_causal_check.slotted_trades`/`slotted_equity_curve` (already-
+validated portfolio-simulation machinery) on both the unfiltered and
+`bounce_1d<median`-filtered populations, at matched slot counts:
+
+| slots | ticker_list unfiltered CAGR | ticker_list filtered CAGR | oos unfiltered CAGR | oos filtered CAGR |
+|---|---|---|---|---|
+| 5 | +44.4% | +26.1% | +61.3% | +37.7% |
+| 10 | +22.6% | +12.5% | +34.9% | +18.8% |
+| 24 | +8.9% | +5.0% | +13.5% | +7.5% |
+
+A median split throws out exactly half the trades by construction (576/1152,
+852/1703), and CAGR drops by roughly half at every slot count tested, while
+Sharpe barely moves (4.19-4.33 vs. 4.25-4.33 ticker_list; 4.74-4.83 oos) --
+the filtered trades aren't meaningfully safer per unit of risk, just fewer.
+At 5 slots the unfiltered book already accepts 91-93% of its own trades
+(1052/1152, 1374/1703), so concurrency isn't the binding constraint being
+relieved by filtering -- you're skipping trades that would have run in
+parallel anyway and were still profitable alone (excluded-half mean excess:
++0.76% both universes). **Confirms sizing over gating, quantitatively, not
+just directionally**: the lift per trade is real but too small to outweigh
+the trade count given up. Script: `run_bounce_filter_profitability.py`.
+
+**Loss share -- a different, complementary lens: fewer and smaller losses,
+not just a higher average.** Net of the 10bp round-trip cost:
+
+| | ticker_list loss rate | oos loss rate |
+|---|---|---|
+| simple two-touch (all trades) | 17.7% | 19.6% |
+| enhanced (`bounce_1d<median`) | **12.7%** | **15.5%** |
+| excluded half (`bounce_1d>=median`) | 22.7% | 23.7% |
+
+The enhanced group loses on roughly 1 in 8 trades instead of 1 in 5-6, and
+losses are smaller too when they happen (mean loss -2.31% vs -2.54% ticker_list,
+-1.83% vs -2.38% oos) -- the excluded half has both a higher loss rate AND
+bigger losses (-2.67%/-2.73%). This doesn't change the CAGR conclusion above
+(gating still gives up too much volume to win on total compounding) but it's
+a genuinely different property worth keeping separate: `bounce_1d` reduces
+how often and how badly a given trade goes wrong, which matters for
+risk-budgeting/psychology even where it doesn't win on raw total return.
+
+### Net read
+
+Across every covariate tried this session -- birth volume, company
+momentum, dip depth, market trend, market volatility, VIX, candle shape,
+and the post-birth bounce size -- only two (`market_depth_10d`,
+`bounce_1d`/`bounce_to_entry_high`) are real and placebo-specific on the
+two-touch population, and both are population-dependent (null on
+bare-local-low), which doesn't disqualify either for someone trading the
+two-touch strategy specifically but does mean neither reflects the general
+reversal mechanism this project has otherwise identified. Of the two, the
+post-birth bounce is the stronger candidate: it clears the full multi-period
+bar on `ticker_list` and misses OOS by a noise-level margin, versus
+`market_depth_10d`'s real (not noise-level) dips on both universes. Every
+other covariate tried (birth volume, momentum beyond `rel_mom_5d`, raw
+stock-level dip depth, "near its lows", VIX, candle shape) came back a
+clean negative. **Still nothing from this whole feature search should be
+treated as validated enough to change what's live** -- if anything is
+picked up next, `bounce_1d`/`bounce_to_entry_high` is the one with the
+best-supported case for a real forward test, not a backtest-only decision.
+The clearest general lesson: this project has now shown multiple times in
+one session (birth-volume's threshold sweep, market_depth's
+population-dependence, VIX's failure to replicate OOS, and this section's
+own lookahead bug) that a clean-looking result can be an artifact of
+exactly which population, universe, threshold, OR TIME WINDOW RELATIVE TO
+THE OUTCOME it's measured against -- the last of these hadn't shown up as a
+distinct failure mode before this section, and a sample collapsing to
+near-zero once lookahead is closed is now a specific diagnostic worth
+checking whenever a new time-based feature is tried. Given diminishing
+returns from mining this same historical window further, the more valuable
+next step is the one this project already leans on elsewhere: let the live
+forward record accumulate rather than testing more features against the
+same fixed history. All scripts and regenerable CSV/PNG outputs live under
+`strategies/five_day_bounce/experiments/volume_gated_levels/`, isolated from
+every file the live strategy actually imports.

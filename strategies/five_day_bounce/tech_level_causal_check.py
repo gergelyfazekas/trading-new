@@ -351,43 +351,46 @@ def _trough_confirmed_by(log_close, distance, prominence, t_pos, as_of_pos):
     return t_pos in trough_idx
 
 
-def build_placebo_candidates(close, combo, near_pct=NEAR_PCT, age_cutoff_days=AGE_CUTOFF_DAYS,
-                              max_check_ahead=15):
-    """Causal local-low entries with no level/band machinery: price within
-    near_pct of a recently confirmed local trough. Confirmation is checked
-    directly -- truncate-and-rerun find_peaks, same discipline
-    causal_entry_and_resistance uses for levels -- rather than assumed from
-    a fixed lag. (An earlier version of this function approximated the
-    confirmation date as trough_date + distance trading sessions; distance=10
-    means that bound is >= ~14 calendar days, which always exceeds the
-    5-calendar-day age window and silently made this placebo empty by
-    construction -- caught because Step C printed zero candidates on every
-    ticker, not by inspection.) Restricting the truncate-and-rerun check to
-    a small window right after each candidate trough keeps this cheap:
-    O(n_troughs * max_check_ahead) find_peaks calls per ticker, not O(n^2).
+def placebo_trough_confirmations(close, combo, max_check_ahead=15):
+    """The expensive half of placebo_raw_days -- find every trough and, for
+    each, the day position it first becomes causally confirmable
+    (truncate-and-rerun find_peaks, not a fixed lag). Depends only on
+    (close, combo's distance/prominence) -- NOT on near_pct, age_cutoff_days,
+    or hold_days -- so a caller sweeping those (a parameter grid) should
+    compute this once per (ticker, combo) and reuse it, rather than repeat
+    an O(n_troughs * max_check_ahead) confirmation walk on every grid cell.
+    Split out after a parameter sweep first exposed this as the dominant
+    cost -- 25 grid cells each recomputing the same near_pct-independent
+    walk from scratch made a full sweep 25x slower than necessary (see
+    tech_level_placebo_sensitivity.py).
     """
     distance = combo["distance"]
     prominence = combo["prominence"]
     log_close = np.log(close.to_numpy())
     trough_idx, _ = find_peaks(-log_close, distance=distance, prominence=prominence)
-    idx = close.index
-    n = len(idx)
-    if len(trough_idx) == 0:
-        return []
-
+    n = len(close)
     confirm_pos = {}
     for t_pos in trough_idx:
         for as_of in range(t_pos, min(t_pos + max_check_ahead, n - 1) + 1):
             if _trough_confirmed_by(log_close, distance, prominence, t_pos, as_of):
                 confirm_pos[t_pos] = as_of
                 break
+    return trough_idx, confirm_pos
 
-    candidates = []
-    in_position_until = -1
+
+def placebo_raw_days_from_confirmations(close, trough_idx, confirm_pos, near_pct=NEAR_PCT,
+                                         age_cutoff_days=AGE_CUTOFF_DAYS):
+    """Cheap half of placebo_raw_days: the day-level near_pct/age filter,
+    given precomputed (trough_idx, confirm_pos) from placebo_trough_confirmations.
+    """
+    idx = close.index
+    n = len(idx)
+    if len(trough_idx) == 0:
+        return set()
+
+    qualifying = set()
     ti = 0  # pointer into trough_idx
     for i in range(n):
-        if i <= in_position_until:
-            continue
         while ti < len(trough_idx) - 1 and trough_idx[ti + 1] <= i:
             ti += 1
         t_pos = trough_idx[ti]
@@ -403,8 +406,72 @@ def build_placebo_candidates(close, combo, near_pct=NEAR_PCT, age_cutoff_days=AG
         trough_price = close.iloc[t_pos]
         dist = (price - trough_price) / price
         if 0 <= dist <= near_pct:
-            candidates.append(i)
-            in_position_until = min(i + HOLD_DAYS, n - 1)
+            qualifying.add(i)
+    return qualifying
+
+
+def placebo_raw_days(close, combo, near_pct=NEAR_PCT, age_cutoff_days=AGE_CUTOFF_DAYS,
+                      max_check_ahead=15):
+    """Day-level bare-local-low condition -- price within near_pct of a
+    recently confirmed local trough -- with NO one-position-at-a-time
+    blocking applied. Returns the set of every day position that
+    raw-qualifies, independent of whether an earlier candidate's hold window
+    would still be open.
+
+    Factored out of build_placebo_candidates (which applies the blocking on
+    top of this) so a day-level condition is available on its own --
+    needed by tech_level_confluence_check.py to test whether this condition
+    and the real technical-level condition hold on the *same* day, which
+    the blocked, one-trade-per-window candidate list would silently distort
+    (a day could fail to appear in the blocked list only because an earlier,
+    unrelated candidate's hold window was still open, not because the
+    condition itself was false that day).
+
+    Convenience wrapper around placebo_trough_confirmations +
+    placebo_raw_days_from_confirmations for a single (near_pct,
+    age_cutoff_days) call -- prefer calling those two directly when sweeping
+    near_pct/age_cutoff_days for the same (close, combo) repeatedly.
+    """
+    trough_idx, confirm_pos = placebo_trough_confirmations(close, combo, max_check_ahead)
+    return placebo_raw_days_from_confirmations(close, trough_idx, confirm_pos, near_pct, age_cutoff_days)
+
+
+def build_placebo_candidates(close, combo, near_pct=NEAR_PCT, age_cutoff_days=AGE_CUTOFF_DAYS,
+                              max_check_ahead=15, hold_days=HOLD_DAYS, confirmations=None):
+    """Causal local-low entries with no level/band machinery: price within
+    near_pct of a recently confirmed local trough (placebo_raw_days), with
+    one-position-at-a-time blocking applied -- a trade-level candidate list,
+    matching how build_placebo_trades and the original naive-strategy
+    backtest both treat one open position per ticker at a time. `hold_days`
+    controls how long an accepted candidate blocks new ones (defaults to the
+    module HOLD_DAYS for existing callers); a hold_days *sweep* must pass the
+    value actually being tested here, not rely on the default, or the
+    blocking window would silently mismatch the position-duration being
+    simulated (see tech_level_placebo_sensitivity.py). `confirmations`, when
+    given, is a precomputed (trough_idx, confirm_pos) pair from
+    placebo_trough_confirmations -- pass it when sweeping near_pct/hold_days
+    for the same (close, combo) to skip recomputing the expensive,
+    near_pct-independent confirmation walk on every call. (An earlier version
+    of this function approximated confirmation as trough_date + distance
+    trading sessions; distance=10 means that bound is >= ~14 calendar days,
+    which always exceeds the 5-calendar-day age window and silently made
+    this placebo empty by construction -- caught because Step C printed zero
+    candidates on every ticker, not by inspection.)
+    """
+    n = len(close)
+    if confirmations is not None:
+        trough_idx, confirm_pos = confirmations
+        qualifying = placebo_raw_days_from_confirmations(close, trough_idx, confirm_pos, near_pct, age_cutoff_days)
+    else:
+        qualifying = placebo_raw_days(close, combo, near_pct, age_cutoff_days, max_check_ahead)
+
+    candidates = []
+    in_position_until = -1
+    for i in sorted(qualifying):
+        if i <= in_position_until:
+            continue
+        candidates.append(i)
+        in_position_until = min(i + hold_days, n - 1)
     return candidates
 
 
