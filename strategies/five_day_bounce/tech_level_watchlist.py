@@ -62,8 +62,15 @@ closing inside was checked and found to be a materially worse entry, not a
 stronger one -- see tech_levels_notes.md, 2026-09-08 section.
 
 Run (from repo root): ./venv/bin/python strategies/five_day_bounce/tech_level_watchlist.py
+
+  --live  Read-only "what to buy right now" view: pulls current prices (the
+          still-forming bar, so run it near the close), rebuilds levels, and
+          shows live price vs. level per ticker. Writes nothing -- no log rows,
+          no position changes. Held names are compared to the level they were
+          bought on, so a price under that level is visible at a glance.
 """
 import os
+import sys
 
 import pandas as pd
 
@@ -94,7 +101,77 @@ def load_latest(path=SIGNAL_LOG_FILE):
     return df.sort_values("run_date").groupby("ticker", as_index=False).tail(1).set_index("ticker")
 
 
+def live_view():
+    import datetime
+    import socket
+    from tech_level_live import pull_all, SOCKET_TIMEOUT
+    from tech_level_naive_strategy import load_fixed_combo
+    from tech_level_continuation_live import evaluate_ticker, load_positions
+
+    socket.setdefaulttimeout(SOCKET_TIMEOUT)
+    combo = load_fixed_combo()
+    series, failed = pull_all(LIVE_TICKERS)
+    positions = load_positions()
+    log = load_latest()
+    # level each open position was bought on = its most recent 'buy' row
+    buys = pd.read_csv(SIGNAL_LOG_FILE, parse_dates=["run_date", "as_of"])
+    buys = buys[buys["event"] == "buy"].sort_values("run_date").groupby("ticker").tail(1).set_index("ticker")
+
+    rows = []
+    for ticker in LIVE_TICKERS:
+        if ticker not in series:
+            continue
+        close, _ = series[ticker]
+        price = float(close.iloc[-1])
+        as_of = pd.Timestamp(close.index[-1]).date()
+        # fresh evaluation with NO position state: is this a buy at this exact price?
+        row, _ = evaluate_ticker(ticker, close, combo, {}, combo["distance"])
+        held = ticker in positions
+        lo, hi, age, birth = row["support_low"], row["support_high"], row["support_age_days"], row["support_birth"]
+        if held and ticker in buys.index:
+            b = buys.loc[ticker]
+            lo, hi, age, birth = b["support_low"], b["support_high"], None, b["support_birth"]
+        vs = (price - hi) / hi if pd.notna(hi) else None
+        rows.append(dict(ticker=ticker, price=price, as_of=as_of, event=row["event"], held=held,
+                         lo=lo, hi=hi, age=age, birth=birth, vs=vs,
+                         prov=row["provisional"], entry=positions.get(ticker, {}).get("entry_price")))
+
+    df = pd.DataFrame(rows)
+    df["action"] = "watch"
+    df.loc[df["event"] == "buy", "action"] = "BUY NOW"
+    df.loc[df["held"], "action"] = "HELD"
+    df["rank"] = df["action"].map({"BUY NOW": 0, "HELD": 1, "watch": 2})
+    df["absvs"] = df["vs"].abs().fillna(float("inf"))
+    df = df.sort_values(["rank", "absvs"])
+
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    print(f"LIVE watchlist -- {stamp} local, bar dated {df['as_of'].max()} (intraday, unsettled)\n"
+          f"BUY NOW = live price 0-{NEAR_PCT:.0%} above an unbroken support born < {MAX_AGE_DAYS}d ago.\n"
+          f"vs LEVEL = live price relative to the level's top edge (negative = UNDER the level).\n")
+    header = f"{'':1} {'TICKER':6} {'ACTION':8} {'LIVE':>9} {'LEVEL':>15} {'vs LEVEL':>9} {'BORN':>11}  NOTE"
+    print(header)
+    print("-" * len(header))
+    for _, r in df.iterrows():
+        if r["action"] == "watch" and (pd.isna(r["vs"]) or r["vs"] > 0.03):
+            continue  # only show names within 3% above a level
+        level = f"{r['lo']:.2f}-{r['hi']:.2f}" if pd.notna(r["hi"]) else "--"
+        vs = f"{r['vs']:+.1%}" if pd.notna(r["vs"]) else "--"
+        note = ""
+        if r["action"] == "HELD":
+            note = f"entry {r['entry']:.2f} ({r['price'] / r['entry'] - 1:+.1%})"
+            if pd.notna(r["vs"]) and r["vs"] < 0:
+                note += " -- UNDER the level it was bought on"
+        elif r["action"] == "BUY NOW" and r["prov"] is True:
+            note = "provisional"
+        print(f"{'*' if r['action'] == 'BUY NOW' else ' '} {r['ticker']:6} {r['action']:8} {r['price']:>9.2f} "
+              f"{level:>15} {vs:>9} {str(r['birth'] or '--'):>11}  {note}")
+    if failed:
+        print(f"\nno data: {', '.join(sorted(failed))}")
+
+
 def main():
+    if "--live" in sys.argv[1:]:
+        return live_view()
     latest = load_latest()
     latest = latest.reindex(LIVE_TICKERS)
 

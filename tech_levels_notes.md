@@ -2028,3 +2028,102 @@ forward record accumulate rather than testing more features against the
 same fixed history. All scripts and regenerable CSV/PNG outputs live under
 `strategies/five_day_bounce/experiments/volume_gated_levels/`, isolated from
 every file the live strategy actually imports.
+
+## Day-by-day (fully causal) test of the frozen rule: the edge does not survive (2026-09-21)
+
+**Supersedes the conclusions of the two 2026-09-15 causal-check sections
+above** ("the causally-confirmed subset still shows a real, positive edge",
+~+0.5% mean excess, "confirmed twice over"). Prompted by a live FDX buy whose
+"support" (301.47-301.72, "born" 2026-09-16) was a 2-day-old trough paired with
+a lone trough from 2026-04-09 -- open candidates in `build_levels_causal` never
+expire -- and which price fell through two days later.
+
+### What was run
+`strategies/five_day_bounce/experiments/original_rule_daybyday.py`: for every
+trading day d, levels rebuilt from `close[:d]` only with the live builder's
+logic (sanity-asserted equal to `build_levels`), the exact live rule (fixed
+combo; support <5 calendar days old; close 0-1% above band top; exit after 5
+sessions or on entering the entry-time resistance; 10 bps; one position per
+ticker), 20 random tickers from LIVE_TICKERS (seed 21), ~2845 sessions each.
+Benchmark = equal-weight of the same 20; placebo = random entries, matched
+per-ticker count.
+
+| | n | hit | net | excess | t |
+|---|---|---|---|---|---|
+| whole-history backtest, same tickers | 503 | 80.9% | +1.97% | +0.91% | +7.5 |
+| **day-by-day causal** | 318 | 53.8% | +0.09% | **-0.20%** | -1.06 |
+| placebo (matched n) | | | | -0.33% | (lift +0.14%) |
+
+Earlier day-by-day runs, same conclusion: 5 tickers (FDX/TMO/MSFT/GD/PEP)
+n=76, excess -0.04%; 10 tickers (seed 7) n=174, excess -0.47%. SE on the
+20-ticker excess is ~0.2%, so a small positive edge is not excluded, but the
++0.9-1.0% headline is ~5 SE away. By year: positive 2018-20, 2023; negative
+2016-17, 2021-22, 2024-26 (2025: -1.19%, t=-1.9). No consistent pattern.
+
+### Why the 2026-09-15 causal check missed it (reconciled on the same 20 tickers)
+Step A of `tech_level_causal_check.py` took the trades the *hindsight*
+backtest had already produced and asked whether each would still fire on
+truncated data. That filter only ever removes trades; it can never add the
+trades a real-time system takes that hindsight never listed. Splitting the
+day-by-day trades by whether the (ticker, entry date) is in the hindsight list:
+
+| day-by-day trades | n | hit | excess | t |
+|---|---|---|---|---|
+| also in hindsight list (what Step A could see) | 133 | 78.9% | +0.81% | +3.15 |
+| **not in hindsight list ("false starts")** | 185 | 35.7% | **-0.92%** | -3.69 |
+
+The first row reproduces Step A's "surviving edge"; the second is the half it
+could not see. Mechanism: a trade is in the hindsight list only if the touch
+also survives the *following* ~10 sessions (find_peaks `distance=10` discards
+a low that a later, lower low displaces; `mark_broken` likewise uses later
+bars). Conditioning on "price did not undercut this low afterwards" is
+conditioning on the future, and it selects the winners. Live trading buys the
+lows that later got undercut too. (Caveat: matching is on (ticker, entry date);
+position-state sequencing differs slightly between the two simulations, so the
+split is approximate.)
+
+Consequences for earlier conclusions:
+- Step A's "~+0.5% causally-confirmed edge" and Step B's bootstrap/clustered
+  inference were inference on the survivor subset -- statistically fine, but
+  on a sample selected with future information.
+- Step C's "the placebo matches the level rule, so it's just short-horizon
+  reversal" compared two populations filtered by the *same* future-conditioned
+  confirmation, so both inherited the same bias; the match is expected and
+  says nothing about a reversal effect. Treat "reversal after a local low" as
+  unvalidated too.
+- The live `provisional` flag and the module docstring's caveat were right in
+  kind; the size of the problem was underestimated (backtest ~+0.9% vs ~-0.2%).
+
+### Variants tested day-by-day (all on small samples; none rescues the rule)
+- Gap cap (<=60 sessions between the level's two touches): stale-pair trades
+  (gap >60) -0.23% excess vs -0.16% for gap <=60 on the 20-ticker run (5-ticker
+  run: +0.09% for gap60 vs -0.04% base, n=52). Not the main problem.
+- Confirmation delay (level >=2 sessions old): worse (-0.34%, 5 tickers).
+- Same-type pairs only (trough+trough): hindsight backtest, ~same edge, ~20%
+  fewer trades; would not have prevented FDX (both touches were troughs).
+- Two troughs <10 sessions apart (find_peaks distance=1), unbroken, 10
+  tickers: +0.76% net but -0.09% excess (t=-0.21), n=88.
+- Big-fall-then-small-retest pair (A drop >=1.5% over prior 10 sessions, B a
+  smaller local low 2-3 sessions later within 0.8%): two 10-ticker groups,
+  excess -0.38%/+0.07% ("hold" variant), lift over placebo -0.14%/+0.65%. Noise.
+Parameters for all variants were fixed a priori, not tuned on these samples.
+
+### Limits of this test
+20 tickers / ~320 trades (SE ~0.2%); equal-weight benchmark of the sample, not
+the market; today's large-cap universe (survivorship would inflate, not
+deflate, the result); yfinance adjusted closes; one hold length; no
+regime/earnings filter. A full 100-name day-by-day run has not been done.
+
+### Status
+The frozen rule is **not validated**. Do not size or trust BUY signals from
+the watchlist on the strength of the earlier backtest numbers. The forward
+record (`data/continuation_trades.csv`, since 2026-09-07) is the only true
+out-of-sample evidence and is far too short to judge. Also added:
+`tech_level_watchlist.py --live` (read-only live price vs level view) and
+`tech_levels.find_touches(with_kind=)` / `build_levels_causal(same_type=)`
+(opt-in, default off; live behavior unchanged). Scripts and trade CSVs in
+`strategies/five_day_bounce/experiments/`.
+
+Open: full-universe day-by-day run; whether any version of "buy a fresh local
+low" has a causal edge at all (none found so far); decision on whether to keep
+the live cron running purely as a forward record.

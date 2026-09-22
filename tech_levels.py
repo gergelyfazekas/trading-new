@@ -25,7 +25,7 @@ class Level:
 
 
 def find_touches(close: pd.Series, volume: pd.Series = None, consider_volume=False,
-                  volume_height=0.0, volume_prominence=0.0, **find_peaks_kwargs):
+                  volume_height=0.0, volume_prominence=0.0, with_kind=False, **find_peaks_kwargs):
     """Find candidate touch points (price peaks/troughs, optionally + high-volume dates)
     over the whole series at once. Returns [(date, price), ...] sorted chronologically.
 
@@ -53,6 +53,8 @@ def find_touches(close: pd.Series, volume: pd.Series = None, consider_volume=Fal
     peak_idx, _ = find_peaks(log_close, **find_peaks_kwargs)
     trough_idx, _ = find_peaks(-log_close, **find_peaks_kwargs)
     touch_dates = close.index[np.concatenate([peak_idx, trough_idx])]
+    kind_by_date = {**{close.index[i]: 'peak' for i in peak_idx},
+                    **{close.index[i]: 'trough' for i in trough_idx}}
 
     if consider_volume and volume is not None:
         centered = (volume - volume.mean()) / volume.std()
@@ -60,10 +62,12 @@ def find_touches(close: pd.Series, volume: pd.Series = None, consider_volume=Fal
         touch_dates = touch_dates.append(volume.index[vol_peak_idx])
 
     touch_dates = pd.Index(touch_dates).unique().sort_values()
+    if with_kind:
+        return [(d, float(close.loc[d]), kind_by_date.get(d, 'volume')) for d in touch_dates]
     return [(d, float(close.loc[d])) for d in touch_dates]
 
 
-def build_levels_causal(touches, tech_width):
+def build_levels_causal(touches, tech_width, same_type=False):
     """Build levels from a chronologically-sorted touch list without lookahead.
 
     Walks touches in date order. A touch either:
@@ -75,22 +79,29 @@ def build_levels_causal(touches, tech_width):
 
     This is what makes it safe to run once over the whole history: a level's
     existence and boundaries only ever depend on touches at or before its birth.
+
+    same_type=True (experimental, default off = the frozen live behavior) only
+    pairs a touch with an open candidate of the same kind (peak+peak or
+    trough+trough); needs touches from find_touches(with_kind=True).
     """
     levels = []
-    open_candidates = []  # [(date, price), ...] not yet confirmed into a level
+    open_candidates = []  # [(date, price, kind), ...] not yet confirmed into a level
 
-    for date, price in touches:
+    for t in touches:
+        date, price = t[0], t[1]
+        kind = t[2] if same_type else None
         if any(lvl.band[0] <= price <= lvl.band[1] for lvl in levels):
             continue
 
-        within = [c for c in open_candidates if abs(price - c[1]) < tech_width * c[1]]
+        within = [c for c in open_candidates
+                  if abs(price - c[1]) < tech_width * c[1] and c[2] == kind]
         if within:
             matched = min(within, key=lambda c: abs(price - c[1]))
             band = (min(matched[1], price), max(matched[1], price))
             levels.append(Level(band=band, birth_date=date))
             open_candidates.remove(matched)
         else:
-            open_candidates.append((date, price))
+            open_candidates.append((date, price, kind))
 
     return levels
 

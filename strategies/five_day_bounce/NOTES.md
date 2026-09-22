@@ -12,6 +12,15 @@ split, and the level-age finding (2026-09-07)" and "Going live on the
 continuation effect (2026-09-07)"). This file is the map of *this folder*,
 not a restatement of the research.
 
+> **WARNING (2026-09-21): the edge described below did not survive a strict
+> day-by-day causal test** (levels rebuilt each day from data available that
+> day): 318 trades on 20 tickers, hit rate 54% vs 81% in the whole-history
+> backtest, excess -0.20% (t=-1.1) vs +0.91%. The earlier "causally confirmed"
+> checks only re-tested trades the hindsight backtest had already selected, so
+> they missed the trades live trading takes that later get undercut. The rule
+> is **not validated**; see `tech_levels_notes.md`, "Day-by-day (fully causal)
+> test of the frozen rule" (2026-09-21).
+
 ## What it actually is
 
 It is **not** "price respects a known support level." Slicing trades by how
