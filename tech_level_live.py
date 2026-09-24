@@ -154,10 +154,15 @@ def current_levels(ticker, combo, close=None, volume=None):
     return levels, float(close.iloc[-1]), close.index[-1]
 
 
-def pull_all(tickers, attempts=DOWNLOAD_ATTEMPTS, backoff=DOWNLOAD_BACKOFF):
-    """Fresh full-history (close, volume) for every ticker in ONE download.
+def pull_all(tickers, attempts=DOWNLOAD_ATTEMPTS, backoff=DOWNLOAD_BACKOFF, include_hl=False):
+    """Fresh full-history (close, volume) for every ticker in ONE download,
+    or (close, high, low, volume) when include_hl=True.
 
-    Returns ({ticker: (close, volume)}, [tickers that came back with no data]).
+    Returns ({ticker: (close, volume) or (close, high, low, volume)},
+    [tickers that came back with no data]). include_hl defaults to False so
+    every existing caller (which unpacks a 2-tuple) is unaffected;
+    yfinance's download already carries high/low, this just chooses whether
+    to surface them.
 
     Batching matters more than it looks. The previous shape called
     StockList([ticker]) once per name, so a 40-ticker run meant 40 separate
@@ -196,7 +201,12 @@ def pull_all(tickers, attempts=DOWNLOAD_ATTEMPTS, backoff=DOWNLOAD_BACKOFF):
                     failed.append(ticker)
                     continue
                 volume = data['volume'].reindex(close.index) if 'volume' in data.columns else None
-                series[ticker] = (close, volume)
+                if include_hl:
+                    high = data['high'].reindex(close.index) if 'high' in data.columns else None
+                    low = data['low'].reindex(close.index) if 'low' in data.columns else None
+                    series[ticker] = (close, high, low, volume)
+                else:
+                    series[ticker] = (close, volume)
             except Exception:
                 failed.append(ticker)
 

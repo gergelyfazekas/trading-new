@@ -11,6 +11,7 @@ output feeds a **portfolio** model. Long-only over 40 large caps
 | `forecasting_notes.md` | pipeline architecture, target choice, volatility model (stage C), return model (stage A), evaluation conventions |
 | `tech_levels_notes.md` | the technical support/resistance level work: causal construction, grid search, validation, and why it did not make it into the forecast |
 | `signals_notes.md` | the sparse-signal redesign: event-study harness, the first signal and its refutation, and the out-of-sample rule that came out of it |
+| `mean_reversion_notes.md` | candidate signals for short-term mean reversion after the Five-Day Bounce's causal disproof — the design constraint (no forward-looking extremum confirmation) and untested candidates |
 
 ## Status (2026-07-21)
 
